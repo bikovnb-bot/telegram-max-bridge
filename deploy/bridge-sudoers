@@ -1,0 +1,13 @@
+# Разрешает пользователю "bridge" перезапускать/проверять статус только двух
+# конкретных systemd-сервисов моста, без пароля и без доступа к другим командам.
+#
+# Установка на сервере:
+#   sudo visudo -c -f deploy/bridge-sudoers   # проверить синтаксис перед установкой
+#   sudo cp deploy/bridge-sudoers /etc/sudoers.d/bridge
+#   sudo chmod 440 /etc/sudoers.d/bridge
+#   sudo visudo -c                             # проверить, что вся конфигурация валидна
+
+bridge ALL=(root) NOPASSWD: /usr/bin/systemctl restart telegram-max-bridge
+bridge ALL=(root) NOPASSWD: /usr/bin/systemctl restart telegram-max-bridge-web
+bridge ALL=(root) NOPASSWD: /usr/bin/systemctl is-active telegram-max-bridge
+bridge ALL=(root) NOPASSWD: /usr/bin/systemctl is-active telegram-max-bridge-web

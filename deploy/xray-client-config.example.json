@@ -1,0 +1,40 @@
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": { "udp": true }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "ВАШ_ХОСТ_ИЗ_ССЫЛКИ",
+            "port": 443,
+            "users": [
+              {
+                "id": "ВАШ_UUID_ИЗ_ССЫЛКИ",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "ЗНАЧЕНИЕ_sni_ИЗ_ССЫЛКИ",
+          "publicKey": "ЗНАЧЕНИЕ_pbk_ИЗ_ССЫЛКИ",
+          "shortId": "ЗНАЧЕНИЕ_sid_ИЗ_ССЫЛКИ",
+          "fingerprint": "chrome"
+        }
+      }
+    }
+  ]
+}

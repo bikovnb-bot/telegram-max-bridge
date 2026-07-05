@@ -1,0 +1,12 @@
+# Секреты и локальные данные — никогда не коммитим
+.env
+max_session/
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# прочее
+.DS_Store

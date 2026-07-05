@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram -> MAX bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bridge
+WorkingDirectory=/opt/telegram-max-bridge
+ExecStart=/opt/telegram-max-bridge/.venv/bin/python -m bridge.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
