@@ -1,0 +1,27 @@
+name: Deploy to server
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/telegram-max-bridge
+            git fetch origin
+            git reset --hard origin/main
+            chown -R bridge:bridge bridge requirements.txt deploy README.md .gitignore .env.example .git
+            sudo -u bridge /opt/telegram-max-bridge/.venv/bin/pip install -q -r requirements.txt
+            systemctl restart telegram-max-bridge
+            systemctl restart telegram-max-bridge-web
+            sleep 2
+            systemctl is-active telegram-max-bridge telegram-max-bridge-web
