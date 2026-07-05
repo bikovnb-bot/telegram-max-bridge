@@ -1,5 +1,7 @@
 # telegram-max-bridge
 
+[![Deploy](https://github.com/bikovnb-bot/telegram-max-bridge/actions/workflows/deploy.yml/badge.svg)](https://github.com/bikovnb-bot/telegram-max-bridge/actions/workflows/deploy.yml)
+
 Пересылает сообщения из группы Telegram в мессенджер MAX (группу или личку).
 
 Со стороны Telegram используется обычный бот (Telegram Bot API).
