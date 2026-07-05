@@ -36,7 +36,7 @@ class StatusWriter:
         self._status.last_error = message
         self._flush()
 
-    def record_forwarded(self, text: str, max_chat_id: int) -> None:
+    def record_forwarded(self, text: str, max_chat_id: int, direction: str = "tg->max") -> None:
         self._status.forwarded_count += 1
         self._status.last_forwarded_at = time.time()
         self._recent.appendleft(
@@ -44,6 +44,7 @@ class StatusWriter:
                 "time": time.time(),
                 "text": text[:200],
                 "max_chat_id": max_chat_id,
+                "direction": direction,
             }
         )
         self._status.recent = list(self._recent)

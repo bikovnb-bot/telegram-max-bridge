@@ -306,6 +306,17 @@ ol li, ul li {{ margin-bottom: 0.5rem; }}
       <label>...за сколько секунд (на один чат-источник, лишнее отбрасывается)</label>
       <input name="RATE_LIMIT_WINDOW_SECONDS" value="{settings.rate_limit_window_seconds}" placeholder="напр. 60">
 
+      <label>Пересылать ответы из MAX обратно в Telegram</label>
+      <select name="REVERSE_FORWARD_ENABLED">
+        <option value="true" {"selected" if settings.reverse_forward_enabled else ""}>Включено</option>
+        <option value="false" {"selected" if not settings.reverse_forward_enabled else ""}>Выключено</option>
+      </select>
+
+      <label>Мониторинг хоста: порог диска, % (алерт при превышении)</label>
+      <input name="DISK_ALERT_PERCENT" value="{settings.disk_alert_percent:g}" placeholder="напр. 90">
+      <label>Мониторинг хоста: порог памяти, %</label>
+      <input name="MEM_ALERT_PERCENT" value="{settings.mem_alert_percent:g}" placeholder="напр. 90">
+
       <div style="margin-top:1.2rem;">
         <button type="submit">Сохранить настройки</button>
       </div>
@@ -563,6 +574,17 @@ async def save(request: Request, _: None = Depends(check_auth)) -> RedirectRespo
     rate_window = str(form.get("RATE_LIMIT_WINDOW_SECONDS", "")).strip()
     if rate_window:
         values["RATE_LIMIT_WINDOW_SECONDS"] = rate_window
+
+    if "REVERSE_FORWARD_ENABLED" in form:
+        values["REVERSE_FORWARD_ENABLED"] = str(form.get("REVERSE_FORWARD_ENABLED", "true")).strip()
+
+    disk_pct = str(form.get("DISK_ALERT_PERCENT", "")).strip()
+    if disk_pct:
+        values["DISK_ALERT_PERCENT"] = disk_pct
+
+    mem_pct = str(form.get("MEM_ALERT_PERCENT", "")).strip()
+    if mem_pct:
+        values["MEM_ALERT_PERCENT"] = mem_pct
 
     if "route_tg" in form:
         tg_ids = form.getlist("route_tg")

@@ -66,6 +66,11 @@ class Settings:
     alert_disconnect_seconds: int
     rate_limit_max: int
     rate_limit_window_seconds: int
+    reverse_forward_enabled: bool
+    host_monitor_enabled: bool
+    disk_alert_percent: float
+    mem_alert_percent: float
+    host_monitor_interval_seconds: int
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -87,6 +92,13 @@ class Settings:
             alert_disconnect_seconds=int(os.environ.get("ALERT_DISCONNECT_SECONDS", "120")),
             rate_limit_max=int(os.environ.get("RATE_LIMIT_MAX", "20")),
             rate_limit_window_seconds=int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60")),
+            reverse_forward_enabled=os.environ.get("REVERSE_FORWARD_ENABLED", "true").lower()
+            not in ("false", "0", "no"),
+            host_monitor_enabled=os.environ.get("HOST_MONITOR_ENABLED", "true").lower()
+            not in ("false", "0", "no"),
+            disk_alert_percent=float(os.environ.get("DISK_ALERT_PERCENT", "90")),
+            mem_alert_percent=float(os.environ.get("MEM_ALERT_PERCENT", "90")),
+            host_monitor_interval_seconds=int(os.environ.get("HOST_MONITOR_INTERVAL_SECONDS", "300")),
         )
 
     @property
@@ -107,6 +119,12 @@ class Settings:
                 return route.max_chat_id
         return None
 
+    def telegram_target_for(self, max_chat_id: int) -> int | None:
+        for route in self.routes:
+            if route.max_chat_id == max_chat_id:
+                return route.telegram_chat_id
+        return None
+
 
 _ENV_KEYS = (
     "TELEGRAM_BOT_TOKEN",
@@ -122,6 +140,11 @@ _ENV_KEYS = (
     "ALERT_DISCONNECT_SECONDS",
     "RATE_LIMIT_MAX",
     "RATE_LIMIT_WINDOW_SECONDS",
+    "REVERSE_FORWARD_ENABLED",
+    "HOST_MONITOR_ENABLED",
+    "DISK_ALERT_PERCENT",
+    "MEM_ALERT_PERCENT",
+    "HOST_MONITOR_INTERVAL_SECONDS",
     # legacy имена, оставлены для обратной совместимости при миграции
     "TELEGRAM_SOURCE_CHAT_ID",
     "MAX_TARGET_CHAT_ID",

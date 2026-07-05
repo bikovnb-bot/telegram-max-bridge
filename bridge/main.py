@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from logging.handlers import RotatingFileHandler
 
@@ -13,7 +14,7 @@ from aiogram.enums import ContentType
 from aiogram.filters import Filter
 from aiogram.types import Message as TgMessage
 from aiohttp import web
-from pymax import File, Photo, WebClient
+from pymax import File, Message as MaxMessage, Photo, WebClient
 
 from .config import Settings
 from .status import StatusWriter
@@ -99,6 +100,82 @@ class AlertManager:
         if self.consecutive_failures >= 3 and not self.failure_alert_sent:
             self.failure_alert_sent = True
             await self.notify(f"⚠️ Пересылка в MAX падает подряд: {error}")
+
+
+class HostMonitor:
+    """Периодически проверяет диск и память сервера, шлёт алерт при нехватке.
+
+    Алерт шлётся один раз при переходе через порог и повторно только после
+    возврата ниже порога — чтобы не спамить одним и тем же сообщением.
+    """
+
+    def __init__(
+        self,
+        alerts: AlertManager,
+        path: str,
+        disk_threshold_percent: float = 90.0,
+        mem_threshold_percent: float = 90.0,
+        interval_seconds: int = 300,
+    ) -> None:
+        self.alerts = alerts
+        self.path = path
+        self.disk_threshold_percent = disk_threshold_percent
+        self.mem_threshold_percent = mem_threshold_percent
+        self.interval_seconds = interval_seconds
+        self._disk_alert_sent = False
+        self._mem_alert_sent = False
+
+    def disk_usage_percent(self) -> float | None:
+        try:
+            usage = shutil.disk_usage(self.path)
+        except OSError:
+            return None
+        if usage.total == 0:
+            return None
+        return usage.used / usage.total * 100
+
+    def mem_usage_percent(self) -> float | None:
+        try:
+            info: dict[str, int] = {}
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    key, _, rest = line.partition(":")
+                    parts = rest.strip().split()
+                    if parts:
+                        info[key] = int(parts[0])
+            total = info.get("MemTotal")
+            available = info.get("MemAvailable")
+            if not total or available is None:
+                return None
+            return (total - available) / total * 100
+        except (FileNotFoundError, KeyError, ValueError):
+            return None
+
+    async def check_once(self) -> None:
+        disk_pct = self.disk_usage_percent()
+        if disk_pct is not None:
+            if disk_pct >= self.disk_threshold_percent and not self._disk_alert_sent:
+                self._disk_alert_sent = True
+                await self.alerts.notify(
+                    f"⚠️ Диск заполнен на {disk_pct:.0f}% (порог {self.disk_threshold_percent:.0f}%)"
+                )
+            elif disk_pct < self.disk_threshold_percent:
+                self._disk_alert_sent = False
+
+        mem_pct = self.mem_usage_percent()
+        if mem_pct is not None:
+            if mem_pct >= self.mem_threshold_percent and not self._mem_alert_sent:
+                self._mem_alert_sent = True
+                await self.alerts.notify(
+                    f"⚠️ Память занята на {mem_pct:.0f}% (порог {self.mem_threshold_percent:.0f}%)"
+                )
+            elif mem_pct < self.mem_threshold_percent:
+                self._mem_alert_sent = False
+
+    async def watch(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            await self.check_once()
 
 
 class RateLimiter:
@@ -230,6 +307,66 @@ def build_forwarder(
     return forward
 
 
+def build_max_forwarder(
+    tg_bot: Bot,
+    settings: Settings,
+    status: StatusWriter,
+    alerts: AlertManager,
+    rate_limiter: RateLimiter,
+    max_client: WebClient,
+):
+    """Обрабатывает входящие сообщения MAX и пересылает их обратно в Telegram.
+
+    Пропускает сообщения, отправленные самим мостом (иначе получилось бы эхо:
+    TG -> MAX -> снова в TG), сверяя отправителя с id залогиненного аккаунта.
+    """
+
+    async def on_max_message(event: MaxMessage, client: WebClient) -> None:
+        if not settings.reverse_forward_enabled:
+            return
+        if event.chat_id is None:
+            return
+
+        me = client.me
+        if me is not None and event.sender == me.contact.id:
+            return
+
+        telegram_chat_id = settings.telegram_target_for(event.chat_id)
+        if telegram_chat_id is None:
+            return
+
+        text = event.text or ""
+        if not text:
+            return
+
+        rate_key = f"max:{event.chat_id}"
+        if not rate_limiter.allow(rate_key):
+            logger.warning(
+                "rate limit: сообщение из MAX chat_id=%s отброшено (лимит %s за %sс)",
+                event.chat_id, rate_limiter.max_events, rate_limiter.window_seconds,
+            )
+            if rate_limiter.should_alert(rate_key):
+                asyncio.create_task(
+                    alerts.notify(
+                        f"⚠️ Превышен лимит сообщений из MAX-чата {event.chat_id} "
+                        f"({rate_limiter.max_events}/{rate_limiter.window_seconds}с) — часть сообщений отброшена"
+                    )
+                )
+            return
+
+        try:
+            await tg_bot.send_message(telegram_chat_id, f"[MAX] {text}")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("не удалось переслать сообщение из MAX в Telegram")
+            status.set_error(str(exc))
+            return
+
+        status.record_forwarded(text, telegram_chat_id, direction="max->tg")
+        logger.info("переслано сообщение MAX -> telegram_chat_id=%s", telegram_chat_id)
+
+    return on_max_message
+
+
 def build_forward_api(
     max_client: WebClient,
     settings: Settings,
@@ -343,6 +480,13 @@ async def main() -> None:
     tg_bot = Bot(token=settings.telegram_bot_token)
     alerts = AlertManager(tg_bot, settings)
     rate_limiter = RateLimiter(settings.rate_limit_max, settings.rate_limit_window_seconds)
+    host_monitor = HostMonitor(
+        alerts,
+        path=settings.max_work_dir,
+        disk_threshold_percent=settings.disk_alert_percent,
+        mem_threshold_percent=settings.mem_alert_percent,
+        interval_seconds=settings.host_monitor_interval_seconds,
+    )
 
     @max_client.on_start()
     async def on_max_start(c: WebClient) -> None:
@@ -364,6 +508,10 @@ async def main() -> None:
         FromKnownRoute(settings),
     )
 
+    max_client.on_message()(
+        build_max_forwarder(tg_bot, settings, status, alerts, rate_limiter, max_client)
+    )
+
     forward_app = build_forward_api(max_client, settings, max_ready, status, alerts, rate_limiter)
     runner = web.AppRunner(forward_app)
     await runner.setup()
@@ -375,11 +523,15 @@ async def main() -> None:
         "запуск моста Telegram -> MAX, маршрутов: %s",
         len(settings.routes),
     )
-    await asyncio.gather(
+    tasks = [
         max_client.start(),
         tg_dp.start_polling(tg_bot),
         alerts.watch_disconnect(),
-    )
+    ]
+    if settings.host_monitor_enabled:
+        tasks.append(host_monitor.watch())
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
