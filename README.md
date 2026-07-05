@@ -1,8 +1,11 @@
 # telegram-max-bridge
 
-[![Deploy](https://github.com/bikovnb-bot/telegram-max-bridge/actions/workflows/deploy.yml/badge.svg)](https://github.com/bikovnb-bot/telegram-max-bridge/actions/workflows/deploy.yml)
+[![Test and deploy](https://github.com/bikovnb-bot/telegram-max-bridge/actions/workflows/deploy.yml/badge.svg)](https://github.com/bikovnb-bot/telegram-max-bridge/actions/workflows/deploy.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
-Пересылает сообщения из группы Telegram в мессенджер MAX (группу или личку).
+Пересылает сообщения из группы Telegram в мессенджер MAX (группу или личку) и
+обратно.
 
 Со стороны Telegram используется обычный бот (Telegram Bot API).
 Со стороны MAX — личный аккаунт через неофициальную библиотеку
@@ -12,6 +15,19 @@
 ⚠️ Автоматизация личного аккаунта MAX через неофициальный протокол может
 нарушать пользовательское соглашение MAX и потенциально привести к блокировке
 аккаунта. Используйте на свой риск.
+
+## Содержание
+
+- [Установка](#установка)
+- [Как узнать MAX_TARGET_CHAT_ID](#как-узнать-max_target_chat_id)
+- [Запуск моста](#запуск-моста)
+- [Двусторонняя пересылка (MAX → Telegram)](#двусторонняя-пересылка-max--telegram)
+- [Мониторинг хоста](#мониторинг-хоста)
+- [Тесты](#тесты)
+- [Веб-интерфейс](#веб-интерфейс-просмотр-статуса-и-правка-настроек)
+- [HTTP API для прямой пересылки](#http-api-для-прямой-пересылки-в-max-в-обход-telegram-группы)
+- [Деплой на Linux VPS](#деплой-на-linux-vps-systemd--пошагово)
+- [Лицензия](#лицензия)
 
 ## Установка
 
@@ -332,3 +348,8 @@ scp root@<ip-сервера>:/opt/telegram-max-bridge/max_session/max_session.db
 
 Храните эти файлы так же осторожно, как пароли — `.env` содержит токен бота и
 `FORWARD_TOKEN`, а файл сессии даёт доступ к аккаунту MAX без пароля.
+
+## Лицензия
+
+[MIT](LICENSE) — используйте, изменяйте и распространяйте свободно, с
+указанием авторства.
