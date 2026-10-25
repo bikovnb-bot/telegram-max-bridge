@@ -1,0 +1,29 @@
+# SSH-туннель с сервера приложений до сервера моста: порты моста (8765 — панель,
+# 8766 — /forward) появляются на локальных 18765/18766 сервера приложений.
+# Устанавливается на СЕРВЕРЕ ПРИЛОЖЕНИЙ, не на сервере моста. Подробности и
+# настройка ограниченного пользователя на сервере моста — в README, раздел
+# «Безопасность».
+#
+#   sudo cp deploy/bridge-tunnel.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now bridge-tunnel
+#
+# Замените <ip-сервера-моста> на адрес сервера с мостом. Пользователь
+# bridgetunnel и его ключ создаются заранее (см. README).
+
+[Unit]
+Description=SSH-туннель до telegram-max-bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bridgetunnel
+ExecStart=/usr/bin/ssh -N -i /var/lib/bridgetunnel/.ssh/id_ed25519 \
+  -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=15 \
+  -L 127.0.0.1:18765:127.0.0.1:8765 -L 127.0.0.1:18766:127.0.0.1:8766 \
+  tunnel@<ip-сервера-моста>
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
