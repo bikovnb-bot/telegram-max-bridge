@@ -1,0 +1,10 @@
+[Unit]
+Description=Ежедневная сборка бэкапа telegram-max-bridge (забирается позже по cron)
+
+[Timer]
+OnCalendar=*-*-* 03:10:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

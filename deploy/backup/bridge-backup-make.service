@@ -1,0 +1,6 @@
+[Unit]
+Description=Сборка зашифрованного бэкапа telegram-max-bridge
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bridge-backup-make
