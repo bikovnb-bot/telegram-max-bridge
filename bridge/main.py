@@ -17,7 +17,9 @@ from aiogram.types import Message as TgMessage
 from aiohttp import web
 from pymax import File, Message as MaxMessage, Photo, WebClient
 
+from .archive import Archive
 from .config import Settings
+from .outbox import Attachment, Outbox
 from .status import StatusWriter
 
 logger = logging.getLogger("bridge")
@@ -228,35 +230,26 @@ class RateLimiter:
         return False
 
 
-async def send_to_max(
-    max_client: WebClient,
-    settings: Settings,
-    max_ready: asyncio.Event,
-    status: StatusWriter,
-    alerts: AlertManager,
-    text: str,
-    chat_id: int,
-    attachments: list | None = None,
-) -> None:
-    logger.info("ожидание готовности соединения с MAX")
-    await max_ready.wait()
+def to_pymax_attachments(attachments: list[Attachment]) -> list:
+    return [
+        Photo(raw=raw, name=name) if kind == "photo" else File(raw=raw, name=name)
+        for kind, name, raw in attachments
+    ]
 
-    try:
+
+def make_max_sender(max_client: WebClient):
+    async def send(chat_id: int, text: str, attachments: list[Attachment]) -> None:
         await max_client._app.api.messages.send_message(
             chat_id=chat_id,
             text=text,
-            attachments=attachments or None,
+            attachments=to_pymax_attachments(attachments) or None,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("не удалось переслать сообщение в MAX")
-        status.set_error(str(exc))
-        await alerts.on_forward_failure(str(exc))
-        raise
 
-    status.record_forwarded(text, chat_id)
-    await alerts.on_forward_success()
-    logger.info("переслано сообщение -> max_chat_id=%s", chat_id)
+    return send
 
+
+# Сколько HTTP-запрос /forward ждёт первую попытку доставки, прежде чем ответить 202.
+HTTP_DELIVERY_WAIT_SECONDS = 10.0
 
 # Файл целиком читается в память, поэтому слишком большие не скачиваем.
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
@@ -266,8 +259,8 @@ def _too_large(size: int | None) -> bool:
     return size is not None and size > MAX_ATTACHMENT_BYTES
 
 
-async def _build_attachments(message: TgMessage) -> list:
-    attachments: list = []
+async def _build_attachments(message: TgMessage) -> list[Attachment]:
+    attachments: list[Attachment] = []
     if message.photo:
         largest = message.photo[-1]
         if _too_large(largest.file_size):
@@ -277,7 +270,7 @@ async def _build_attachments(message: TgMessage) -> list:
         raw = buf.read()
         if _too_large(len(raw)):
             return attachments
-        attachments.append(Photo(raw=raw, name="photo.jpg"))
+        attachments.append(("photo", "photo.jpg", raw))
     elif message.document:
         if _too_large(message.document.file_size):
             logger.warning(
@@ -289,15 +282,13 @@ async def _build_attachments(message: TgMessage) -> list:
         if _too_large(len(raw)):
             return attachments
         name = message.document.file_name or "file"
-        attachments.append(File(raw=raw, name=name))
+        attachments.append(("file", name, raw))
     return attachments
 
 
 def build_forwarder(
-    max_client: WebClient,
     settings: Settings,
-    max_ready: asyncio.Event,
-    status: StatusWriter,
+    outbox: Outbox,
     alerts: AlertManager,
     rate_limiter: RateLimiter,
 ):
@@ -335,13 +326,14 @@ def build_forwarder(
         author = message.from_user.full_name if message.from_user else "Telegram"
         forwarded_text = f"{author}: {text}" if text else author
 
-        try:
-            await send_to_max(
-                max_client, settings, max_ready, status, alerts,
-                forwarded_text, target_chat_id, attachments=attachments,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await outbox.submit(
+            target_chat_id,
+            forwarded_text,
+            attachments=attachments,
+            direction="tg->max",
+            source_chat=message.chat.id,
+            author=author,
+        )
 
     return forward
 
@@ -353,6 +345,7 @@ def build_max_forwarder(
     alerts: AlertManager,
     rate_limiter: RateLimiter,
     max_client: WebClient,
+    archive: Archive | None = None,
 ):
     """Обрабатывает входящие сообщения MAX и пересылает их обратно в Telegram.
 
@@ -398,8 +391,20 @@ def build_max_forwarder(
         except Exception as exc:  # noqa: BLE001
             logger.exception("не удалось переслать сообщение из MAX в Telegram")
             status.set_error(str(exc))
+            if archive is not None:
+                archive.add(
+                    "max->tg", text, source_chat=event.chat_id,
+                    target_chat=telegram_chat_id, author=str(event.sender or ""),
+                    status="failed", error=str(exc),
+                )
             return
 
+        if archive is not None:
+            archive.add(
+                "max->tg", text, source_chat=event.chat_id,
+                target_chat=telegram_chat_id, author=str(event.sender or ""),
+                status="sent",
+            )
         status.record_forwarded(text, telegram_chat_id, direction="max->tg")
         logger.info("переслано сообщение MAX -> telegram_chat_id=%s", telegram_chat_id)
 
@@ -413,6 +418,7 @@ def build_forward_api(
     status: StatusWriter,
     alerts: AlertManager,
     rate_limiter: RateLimiter,
+    outbox: Outbox,
 ) -> web.Application:
     """HTTP API для прямой пересылки в MAX, в обход Telegram-группы.
 
@@ -467,21 +473,23 @@ def build_forward_api(
                 )
             return web.json_response({"error": "rate limit exceeded"}, status=429)
 
-        try:
-            await send_to_max(
-                max_client, settings, max_ready, status, alerts, text, chat_id
-            )
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"error": str(exc)}, status=502)
-
-        return web.json_response({"ok": True})
+        result = await outbox.submit(
+            int(chat_id), str(text),
+            direction="http->max", author="http", wait=HTTP_DELIVERY_WAIT_SECONDS,
+        )
+        if result.status == "sent":
+            return web.json_response({"ok": True, "id": result.id})
+        # Не успели доставить за отведённое время (MAX недоступен) — сообщение в
+        # очереди и уйдёт само; 202 для вызывающего сервиса тоже «успех».
+        return web.json_response({"ok": True, "queued": True, "id": result.id}, status=202)
 
     async def handle_chats(request: web.Request) -> web.Response:
         error = _check_auth(request)
         if error is not None:
             return error
 
-        await max_ready.wait()
+        if not max_ready.is_set():
+            return web.json_response({"error": "MAX не подключён"}, status=503)
         try:
             chats = await max_client._app.api.chats.fetch_chats()
         except Exception as exc:  # noqa: BLE001
@@ -539,6 +547,10 @@ async def main() -> None:
     max_ready = asyncio.Event()
     tg_bot = Bot(token=settings.telegram_bot_token)
     alerts = AlertManager(tg_bot, settings)
+    archive = Archive(settings.archive_file, settings.archive_retention_days)
+    outbox = Outbox(
+        archive, make_max_sender(max_client), max_ready, status, alerts, settings.outbox_dir
+    )
     rate_limiter = RateLimiter(settings.rate_limit_max, settings.rate_limit_window_seconds)
     host_monitor = HostMonitor(
         alerts,
@@ -564,20 +576,25 @@ async def main() -> None:
 
     tg_dp = Dispatcher()
     tg_dp.message.register(
-        build_forwarder(max_client, settings, max_ready, status, alerts, rate_limiter),
+        build_forwarder(settings, outbox, alerts, rate_limiter),
         FromKnownRoute(settings),
     )
 
     max_client.on_message()(
-        build_max_forwarder(tg_bot, settings, status, alerts, rate_limiter, max_client)
+        build_max_forwarder(tg_bot, settings, status, alerts, rate_limiter, max_client, archive)
     )
 
-    forward_app = build_forward_api(max_client, settings, max_ready, status, alerts, rate_limiter)
+    forward_app = build_forward_api(
+        max_client, settings, max_ready, status, alerts, rate_limiter, outbox
+    )
     runner = web.AppRunner(forward_app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", settings.forward_port)
+    site = web.TCPSite(runner, settings.forward_bind_host, settings.forward_port)
     await site.start()
-    logger.info("HTTP API для прямой пересылки слушает на порту %s", settings.forward_port)
+    logger.info(
+        "HTTP API для прямой пересылки слушает на %s:%s",
+        settings.forward_bind_host, settings.forward_port,
+    )
 
     logger.info(
         "запуск моста Telegram -> MAX, маршрутов: %s",
@@ -587,6 +604,7 @@ async def main() -> None:
         tg_dp.start_polling(tg_bot),
         max_client.start(),
         alerts.watch_disconnect(),
+        outbox.run(),
     ]
     if settings.host_monitor_enabled:
         tasks.append(host_monitor.watch())
@@ -596,6 +614,7 @@ async def main() -> None:
     finally:
         await runner.cleanup()
         await tg_bot.session.close()
+        archive.close()
 
 
 if __name__ == "__main__":

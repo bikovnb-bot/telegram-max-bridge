@@ -87,6 +87,9 @@ class Settings:
     disk_alert_percent: float
     mem_alert_percent: float
     host_monitor_interval_seconds: int
+    archive_retention_days: int = 90
+    forward_bind_host: str = "0.0.0.0"
+    webui_bind_host: str = "0.0.0.0"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -115,6 +118,9 @@ class Settings:
             disk_alert_percent=float(os.environ.get("DISK_ALERT_PERCENT", "90")),
             mem_alert_percent=float(os.environ.get("MEM_ALERT_PERCENT", "90")),
             host_monitor_interval_seconds=int(os.environ.get("HOST_MONITOR_INTERVAL_SECONDS", "300")),
+            archive_retention_days=max(0, int(os.environ.get("ARCHIVE_RETENTION_DAYS", "90"))),
+            forward_bind_host=os.environ.get("FORWARD_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0",
+            webui_bind_host=os.environ.get("WEBUI_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0",
         )
 
     @property
@@ -124,6 +130,14 @@ class Settings:
     @property
     def log_file(self) -> str:
         return os.path.join(self.max_work_dir, "bridge.log")
+
+    @property
+    def archive_file(self) -> str:
+        return os.path.join(self.max_work_dir, "archive.db")
+
+    @property
+    def outbox_dir(self) -> str:
+        return os.path.join(self.max_work_dir, "outbox")
 
     @property
     def default_max_target(self) -> int | None:
@@ -161,6 +175,9 @@ _ENV_KEYS = (
     "DISK_ALERT_PERCENT",
     "MEM_ALERT_PERCENT",
     "HOST_MONITOR_INTERVAL_SECONDS",
+    "ARCHIVE_RETENTION_DAYS",
+    "FORWARD_BIND_HOST",
+    "WEBUI_BIND_HOST",
     # legacy имена, оставлены для обратной совместимости при миграции
     "TELEGRAM_SOURCE_CHAT_ID",
     "MAX_TARGET_CHAT_ID",

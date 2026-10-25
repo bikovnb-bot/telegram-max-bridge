@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import html
+import io
+import json
 import os
 import secrets
 import time
@@ -15,10 +18,11 @@ from urllib.parse import urlsplit
 
 import aiohttp
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 
+from .archive import count_by_status, query_messages
 from .config import Route, Settings, clean_label, serialize_routes, update_env
 from .status import read_status
 
@@ -155,6 +159,12 @@ def render_page(settings: Settings, message: str | None = None) -> str:
         with open(settings.log_file, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()[-200:]
             log_tail = "".join(lines)
+
+    archive_retention_text = (
+        "бессрочно"
+        if settings.archive_retention_days == 0
+        else f"{settings.archive_retention_days} дн"
+    )
 
     connected = bool(status.get("max_connected"))
     connected_badge = (
@@ -438,6 +448,10 @@ tbody tr:hover {{ background: rgba(255,255,255,0.02); }}
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
       <span>Тест отправки</span>
     </button>
+    <button type="button" class="tab-btn" onclick="showTab('archive', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path></svg>
+      <span>Архив сообщений</span>
+    </button>
     <button type="button" class="tab-btn" onclick="showTab('logs', this)">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
       <span>Журнал (Логи)</span>
@@ -589,6 +603,51 @@ tbody tr:hover {{ background: rgba(255,255,255,0.02); }}
       </div>
     </div>
 
+    <!-- TAB: ARCHIVE -->
+    <div id="tab-archive" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Архив сообщений</div>
+            <div class="card-desc">Все сообщения, пересланные мостом. Срок хранения: {archive_retention_text}. Сообщения «в очереди» доставятся сами, когда MAX снова станет доступен.</div>
+          </div>
+          <a id="archiveCsv" class="btn btn-secondary" href="/archive.csv">Скачать CSV</a>
+        </div>
+
+        <div id="archiveCounts" class="form-hint" style="margin-bottom:0.75rem;"></div>
+
+        <form id="archiveFilters" onsubmit="loadArchive(1); return false;" style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1rem;">
+          <select id="archiveDirection" class="form-select" style="max-width:11rem;">
+            <option value="">Все направления</option>
+            <option value="tg->max">TG → MAX</option>
+            <option value="max->tg">MAX → TG</option>
+            <option value="http->max">HTTP → MAX</option>
+          </select>
+          <select id="archiveStatus" class="form-select" style="max-width:11rem;">
+            <option value="">Любой статус</option>
+            <option value="sent">Доставлено</option>
+            <option value="queued">В очереди</option>
+            <option value="failed">Не доставлено</option>
+          </select>
+          <input id="archiveQuery" class="form-input" placeholder="Поиск по тексту и автору" style="flex:1; min-width:12rem;">
+          <button type="submit" class="btn btn-primary">Найти</button>
+        </form>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Время</th><th>Направление</th><th>Чат</th><th>Автор</th><th>Сообщение</th><th>Статус</th></tr></thead>
+            <tbody id="archiveBody"><tr><td colspan="6" class="muted">Загрузка...</td></tr></tbody>
+          </table>
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1rem;">
+          <button type="button" class="btn btn-secondary" id="archivePrev" onclick="loadArchive(archivePage - 1)">← Новее</button>
+          <span id="archivePager" class="form-hint"></span>
+          <button type="button" class="btn btn-secondary" id="archiveNext" onclick="loadArchive(archivePage + 1)">Старше →</button>
+        </div>
+      </div>
+    </div>
+
     <!-- TAB: LOGS -->
     <div id="tab-logs" class="tab-panel">
       <div class="card">
@@ -662,6 +721,12 @@ tbody tr:hover {{ background: rgba(255,255,255,0.02); }}
               <label>Порог памяти VPS (%)</label>
               <input name="MEM_ALERT_PERCENT" value="{settings.mem_alert_percent:g}" class="form-input font-mono">
               <div class="form-hint">Алерт при нехватке оперативной памяти</div>
+            </div>
+
+            <div class="form-group">
+              <label>Срок хранения архива (дни)</label>
+              <input name="ARCHIVE_RETENTION_DAYS" value="{settings.archive_retention_days}" class="form-input font-mono">
+              <div class="form-hint">Старше этого срока доставленные записи удаляются; 0 — хранить бессрочно</div>
             </div>
           </div>
 
@@ -791,6 +856,92 @@ function setMsg(el, color, text) {{
   el.replaceChildren(p);
 }}
 
+let archivePage = 1;
+const ARCHIVE_DIRECTIONS = {{ 'tg->max': 'TG → MAX', 'max->tg': 'MAX → TG', 'http->max': 'HTTP → MAX' }};
+const ARCHIVE_STATUSES = {{ sent: 'доставлено', queued: 'в очереди', failed: 'не доставлено' }};
+
+function archiveParams(page) {{
+  const params = new URLSearchParams();
+  params.set('page', page);
+  const direction = document.getElementById('archiveDirection').value;
+  const status = document.getElementById('archiveStatus').value;
+  const query = document.getElementById('archiveQuery').value.trim();
+  if (direction) params.set('direction', direction);
+  if (status) params.set('status', status);
+  if (query) params.set('q', query);
+  return params;
+}}
+
+function archiveCell(tr, text, color) {{
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (color) td.style.color = color;
+  tr.appendChild(td);
+  return td;
+}}
+
+async function loadArchive(page) {{
+  if (page < 1) return;
+  const body = document.getElementById('archiveBody');
+  try {{
+    const params = archiveParams(page);
+    const r = await fetch('/api/archive?' + params.toString());
+    const data = await r.json();
+    if (!r.ok) {{
+      body.replaceChildren();
+      const tr = document.createElement('tr');
+      const td = archiveCell(tr, 'Ошибка: ' + (data.error || r.status), 'var(--err)');
+      td.colSpan = 6;
+      body.appendChild(tr);
+      return;
+    }}
+    archivePage = data.page;
+    body.replaceChildren();
+    if (data.rows.length === 0) {{
+      const tr = document.createElement('tr');
+      const td = archiveCell(tr, 'Сообщений нет');
+      td.colSpan = 6;
+      td.className = 'muted';
+      body.appendChild(tr);
+    }}
+    for (const m of data.rows) {{
+      const tr = document.createElement('tr');
+      archiveCell(tr, new Date(m.ts * 1000).toLocaleString('ru-RU'));
+      archiveCell(tr, ARCHIVE_DIRECTIONS[m.direction] || m.direction);
+      archiveCell(tr, m.target_chat ?? '');
+      archiveCell(tr, m.author || '');
+      let text = m.text;
+      if (m.attachments.length) text += '\\n📎 ' + m.attachments.join(', ');
+      const textCell = archiveCell(tr, text);
+      textCell.style.whiteSpace = 'pre-wrap';
+      textCell.style.maxWidth = '28rem';
+      textCell.style.wordBreak = 'break-word';
+      const color = m.status === 'sent' ? 'var(--ok)' : (m.status === 'failed' ? 'var(--err)' : 'var(--muted)');
+      let label = ARCHIVE_STATUSES[m.status] || m.status;
+      if (m.status !== 'sent' && m.error) label += ' — ' + m.error;
+      archiveCell(tr, label, color);
+      body.appendChild(tr);
+    }}
+    const pages = Math.max(1, Math.ceil(data.total / data.per_page));
+    document.getElementById('archivePager').textContent =
+      'Стр. ' + data.page + ' из ' + pages + ' · найдено ' + data.total;
+    document.getElementById('archivePrev').disabled = data.page <= 1;
+    document.getElementById('archiveNext').disabled = data.page >= pages;
+    document.getElementById('archiveCounts').textContent =
+      'Всего: доставлено ' + data.counts.sent + ', в очереди ' + data.counts.queued +
+      ', не доставлено ' + data.counts.failed;
+    const csv = archiveParams(1);
+    csv.delete('page');
+    document.getElementById('archiveCsv').href = '/archive.csv?' + csv.toString();
+  }} catch (e) {{
+    body.replaceChildren();
+    const tr = document.createElement('tr');
+    const td = archiveCell(tr, 'Ошибка запроса: ' + e, 'var(--err)');
+    td.colSpan = 6;
+    body.appendChild(tr);
+  }}
+}}
+
 function showTab(name, btn) {{
   document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
@@ -798,6 +949,7 @@ function showTab(name, btn) {{
   if (panel) panel.classList.add('active');
   if (btn) btn.classList.add('active');
   if (name === 'maintenance') {{ loadServiceStatus(); }}
+  if (name === 'archive') {{ loadArchive(1); }}
 }}
 
 function openChatPicker() {{
@@ -955,6 +1107,10 @@ async def save(request: Request, _: None = Depends(check_auth)) -> RedirectRespo
         if raw and _is_int(raw) and int(raw) > 0:
             values[name] = str(int(raw))
 
+    raw = _field("ARCHIVE_RETENTION_DAYS")
+    if raw and _is_int(raw) and int(raw) >= 0:
+        values["ARCHIVE_RETENTION_DAYS"] = str(int(raw))
+
     for name in ("DISK_ALERT_PERCENT", "MEM_ALERT_PERCENT"):
         raw = _field(name)
         if raw and _is_percent(raw):
@@ -1014,6 +1170,91 @@ async def api_test_send(request: Request, _: None = Depends(check_auth)) -> JSON
     return JSONResponse(data, status_code=status_code)
 
 
+def _archive_row_for_ui(row: dict) -> dict:
+    try:
+        names = [a.get("name") or "файл" for a in json.loads(row.get("attachments") or "[]")]
+    except (ValueError, AttributeError):
+        names = []
+    return {**row, "attachments": names}
+
+
+@app.get("/api/archive")
+async def api_archive(
+    page: int = 1,
+    per_page: int = 50,
+    direction: str = "",
+    status: str = "",
+    q: str = "",
+    _: None = Depends(check_auth),
+) -> JSONResponse:
+    settings = Settings.from_env()
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    rows, total = query_messages(
+        settings.archive_file, per_page, (page - 1) * per_page,
+        direction or None, status or None, q or None,
+    )
+    return JSONResponse(
+        {
+            "rows": [_archive_row_for_ui(r) for r in rows],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "counts": count_by_status(settings.archive_file),
+        }
+    )
+
+
+def _csv_safe(value: object) -> str:
+    """Защита от формул: ячейка, начинающаяся с = + - @, в Excel выполнилась бы."""
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
+@app.get("/archive.csv")
+async def archive_csv(
+    direction: str = "",
+    status: str = "",
+    q: str = "",
+    _: None = Depends(check_auth),
+) -> Response:
+    settings = Settings.from_env()
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(
+        ["id", "время", "направление", "чат-источник", "чат-получатель", "автор",
+         "текст", "вложения", "статус", "ошибка", "попыток"]
+    )
+    offset, step, limit_rows = 0, 500, 50000
+    while offset < limit_rows:
+        rows, total = query_messages(
+            settings.archive_file, step, offset, direction or None, status or None, q or None
+        )
+        if not rows:
+            break
+        for r in rows:
+            writer.writerow(
+                [
+                    r["id"],
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])),
+                    r["direction"], r["source_chat"], r["target_chat"],
+                    _csv_safe(r["author"]), _csv_safe(r["text"]),
+                    _csv_safe(", ".join(_archive_row_for_ui(r)["attachments"])),
+                    r["status"], _csv_safe(r["error"]), r["attempts"],
+                ]
+            )
+        offset += step
+        if offset >= total:
+            break
+    return Response(
+        content="\ufeff" + out.getvalue(),  # BOM, чтобы Excel открыл кириллицу
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="bridge-archive.csv"'},
+    )
+
+
 @app.get("/api/service-status")
 async def api_service_status(_: None = Depends(check_auth)) -> JSONResponse:
     result: dict[str, str] = {}
@@ -1054,7 +1295,7 @@ async def api_restart(key: str, _: None = Depends(check_auth)) -> JSONResponse:
 
 def run() -> None:
     settings = Settings.from_env()
-    uvicorn.run(app, host="0.0.0.0", port=settings.webui_port)
+    uvicorn.run(app, host=settings.webui_bind_host, port=settings.webui_port)
 
 
 if __name__ == "__main__":
