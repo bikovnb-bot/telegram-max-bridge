@@ -10,6 +10,7 @@ import asyncio
 import html
 import os
 import secrets
+import time
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -147,24 +148,39 @@ def render_page(settings: Settings, message: str | None = None) -> str:
 
     connected = bool(status.get("max_connected"))
     connected_badge = (
-        '<span class="badge badge-ok">🟢 подключено</span>'
+        '<span class="badge badge-ok"><span class="pulse-dot"></span> MAX Онлайн</span>'
         if connected
-        else '<span class="badge badge-err">🔴 не подключено</span>'
+        else '<span class="badge badge-err"><span class="static-dot"></span> MAX Отключен</span>'
     )
-    recent_rows = "".join(
-        f"<tr><td>{html.escape(str(r.get('max_chat_id')))}</td>"
-        f"<td>{html.escape(r.get('text', ''))}</td></tr>"
-        for r in status.get("recent", [])
-    ) or "<tr><td colspan='2' class='muted'>Пока ничего не пересылалось</td></tr>"
 
-    message_html = f"<div class='msg'>{html.escape(message)}</div>" if message else ""
+    recent_items = status.get("recent", [])
+    recent_rows_list = []
+    for r in recent_items:
+        ts = r.get("time")
+        t_str = time.strftime("%H:%M:%S", time.localtime(ts)) if ts else "—"
+        direction = r.get("direction", "tg->max")
+        if direction == "max->tg":
+            dir_badge = '<span class="pill pill-purple">MAX → TG</span>'
+        elif direction == "http":
+            dir_badge = '<span class="pill pill-green">HTTP API</span>'
+        else:
+            dir_badge = '<span class="pill pill-blue">TG → MAX</span>'
+
+        chat_id_str = html.escape(str(r.get("max_chat_id", "")))
+        text_str = html.escape(r.get("text", ""))
+        recent_rows_list.append(
+            f'<tr><td class="col-time font-mono">{t_str}</td><td>{dir_badge}</td><td class="font-mono text-purple">{chat_id_str}</td><td class="col-text">{text_str}</td></tr>'
+        )
+    recent_rows = "".join(recent_rows_list) or "<tr><td colspan='4' class='muted text-center py-4'>Пока ничего не пересылалось</td></tr>"
+
+    message_html = f"<div class='toast-banner'>{html.escape(message)}</div>" if message else ""
 
     route_rows = "".join(
         f"""<tr>
-          <td><input name="route_tg" value="{r.telegram_chat_id}"></td>
-          <td><input name="route_max" value="{r.max_chat_id}"></td>
-          <td><input name="route_label" value="{html.escape(r.label)}" placeholder="метка (необязательно)"></td>
-          <td><button type="button" class="secondary" onclick="this.closest('tr').remove()">✕</button></td>
+          <td><input name="route_tg" value="{r.telegram_chat_id}" class="form-input font-mono" placeholder="ID группы TG"></td>
+          <td><input name="route_max" value="{r.max_chat_id}" class="form-input font-mono" placeholder="ID чата MAX"></td>
+          <td><input name="route_label" value="{html.escape(r.label)}" class="form-input" placeholder="метка (необязательно)"></td>
+          <td class="text-right"><button type="button" class="btn-icon-danger" onclick="this.closest('tr').remove()" title="Удалить">✕</button></td>
         </tr>"""
         for r in settings.routes
     )
@@ -179,319 +195,583 @@ def render_page(settings: Settings, message: str | None = None) -> str:
         or "маршруты не настроены"
     )
 
-    return f"""
-<!doctype html>
+    return f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>telegram-max-bridge</title>
+<title>telegram-max-bridge Control Panel</title>
 <style>
 :root {{
-  --bg: #0f1115;
-  --card: #171a21;
-  --border: #262b36;
-  --text: #e6e8eb;
-  --muted: #8b93a3;
-  --accent: #4f8cff;
-  --ok: #2ecc71;
-  --err: #ff5c5c;
-  --warn: #f5a623;
+  --bg: #090d16;
+  --sidebar: #0f1422;
+  --card: #131929;
+  --card-hover: #172033;
+  --border: #1e283d;
+  --border-focus: #3b82f6;
+  --text: #f1f5f9;
+  --muted: #8b99ad;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --ok: #10b981;
+  --err: #ef4444;
+  --warn: #f59e0b;
+  --purple: #a855f7;
 }}
-* {{ box-sizing: border-box; }}
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{
-  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 2rem 1.25rem 4rem;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }}
-h1 {{ font-size: 1.5rem; margin-bottom: 0.25rem; }}
-h2 {{ font-size: 1.1rem; margin-top: 0; color: var(--text); }}
-h3 {{ font-size: 1rem; margin: 1.1rem 0 0.3rem; }}
-.subtitle {{ color: var(--muted); margin-top: 0; margin-bottom: 1.5rem; }}
+.font-mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}
+.topbar {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1.5rem;
+  background: rgba(15, 20, 34, 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}}
+.brand {{ display: flex; align-items: center; gap: 0.75rem; }}
+.brand-icon {{
+  width: 36px; height: 36px; border-radius: 10px;
+  background: linear-gradient(135deg, #2563eb, #6366f1);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; font-weight: bold; color: #fff;
+  box-shadow: 0 4px 12px rgba(37,99,235,0.3);
+}}
+.brand-title {{ font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.5rem; }}
+.brand-sub {{ font-size: 0.75rem; color: var(--muted); }}
+.badge-version {{
+  font-size: 0.7rem; font-weight: 600; padding: 0.15rem 0.45rem; border-radius: 999px;
+  background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3);
+}}
+.top-status {{ display: flex; align-items: center; gap: 0.75rem; font-size: 0.8rem; }}
+.layout {{ display: flex; flex: 1; max-width: 1300px; width: 100%; margin: 0 auto; padding: 1.25rem; gap: 1.5rem; }}
+.sidebar {{ width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0.35rem; }}
+.sidebar-section {{ font-size: 0.7rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; padding: 0.5rem 0.75rem 0.2rem; }}
+.tab-btn {{
+  display: flex; align-items: center; gap: 0.65rem; width: 100%;
+  padding: 0.65rem 0.85rem; border-radius: 10px;
+  background: transparent; color: var(--muted); border: 1px solid transparent;
+  font-size: 0.85rem; font-weight: 600; text-align: left; cursor: pointer; transition: all 0.15s;
+}}
+.tab-btn:hover {{ color: var(--text); background: var(--card); }}
+.tab-btn.active {{ color: #93c5fd; background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.3); }}
+.tab-btn svg {{ width: 16px; height: 16px; stroke-width: 2; flex-shrink: 0; }}
+.main-content {{ flex: 1; min-width: 0; }}
+.tab-panel {{ display: none; flex-direction: column; gap: 1.25rem; }}
+.tab-panel.active {{ display: flex; }}
 .card {{
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 14px;
   padding: 1.25rem 1.5rem;
-  margin-bottom: 1.25rem;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
 }}
-.status-row {{ display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }}
-.badge {{ padding: 0.25rem 0.7rem; border-radius: 999px; font-weight: 600; font-size: 0.9rem; }}
-.badge-ok {{ background: rgba(46,204,113,0.15); color: var(--ok); }}
-.badge-err {{ background: rgba(255,92,92,0.15); color: var(--err); }}
-.badge-warn {{ background: rgba(245,166,35,0.15); color: var(--warn); }}
-.stat {{ color: var(--muted); }}
-.stat b {{ color: var(--text); }}
-label {{ display: block; margin-top: 0.9rem; margin-bottom: 0.3rem; font-weight: 600; font-size: 0.9rem; color: var(--muted); }}
-input, select {{
-  width: 100%; padding: 0.55rem 0.7rem; font-size: 0.95rem;
-  background: #0d0f13; border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+.card-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; }}
+.card-title {{ font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }}
+.card-desc {{ font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }}
+.metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }}
+.metric-box {{
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 1rem 1.2rem; position: relative; overflow: hidden;
 }}
-input:focus, select:focus {{ outline: none; border-color: var(--accent); }}
-button {{
-  margin-top: 1rem; padding: 0.55rem 1.2rem; font-size: 0.95rem;
-  background: var(--accent); color: white; border: none; border-radius: 6px; cursor: pointer;
-  font-weight: 600;
+.metric-label {{ font-size: 0.75rem; font-weight: 600; color: var(--muted); margin-bottom: 0.35rem; }}
+.metric-val {{ font-size: 1.5rem; font-weight: 800; color: #fff; letter-spacing: -0.02em; }}
+.metric-sub {{ font-size: 0.75rem; color: var(--muted); margin-top: 0.35rem; }}
+.pulse-dot {{
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ok); box-shadow: 0 0 0 rgba(16,185,129,0.7);
+  animation: pulse-ring 2s infinite cubic-bezier(0.66, 0, 0, 1);
 }}
-button:hover {{ opacity: 0.9; }}
-button.secondary {{ background: #2a2f3a; }}
-button.danger {{ background: #6b2b2b; }}
-pre {{
-  background: #0a0b0e; color: #c7d0da; padding: 1rem; max-height: 320px; overflow: auto;
-  border-radius: 8px; font-size: 0.82rem; border: 1px solid var(--border);
+@keyframes pulse-ring {{
+  0% {{ box-shadow: 0 0 0 0 rgba(16,185,129,0.7); }}
+  70% {{ box-shadow: 0 0 0 8px rgba(16,185,129,0); }}
+  100% {{ box-shadow: 0 0 0 0 rgba(16,185,129,0); }}
 }}
-table {{ border-collapse: collapse; width: 100%; margin-top: 0.5rem; font-size: 0.9rem; }}
-td, th {{ border-bottom: 1px solid var(--border); padding: 6px 8px; text-align: left; }}
-th {{ color: var(--muted); font-weight: 600; }}
+.static-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--err); }}
+.badge {{
+  display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.65rem;
+  border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+}}
+.badge-ok {{ background: rgba(16,185,129,0.12); color: var(--ok); border: 1px solid rgba(16,185,129,0.25); }}
+.badge-err {{ background: rgba(239,68,68,0.12); color: var(--err); border: 1px solid rgba(239,68,68,0.25); }}
+.pill {{
+  display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px;
+  font-size: 0.7rem; font-weight: 700;
+}}
+.pill-blue {{ background: rgba(59,130,246,0.15); color: #60a5fa; border: 1px solid rgba(59,130,246,0.3); }}
+.pill-purple {{ background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.3); }}
+.pill-green {{ background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3); }}
+.table-wrap {{ width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }}
+table {{ border-collapse: collapse; width: 100%; font-size: 0.82rem; }}
+th {{ background: #0c111e; color: var(--muted); font-weight: 600; padding: 0.65rem 0.9rem; text-align: left; border-bottom: 1px solid var(--border); }}
+td {{ padding: 0.65rem 0.9rem; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+tr:last-child td {{ border-bottom: none; }}
+tbody tr:hover {{ background: rgba(255,255,255,0.02); }}
+.col-time {{ width: 85px; color: var(--muted); }}
+.col-text {{ max-width: 450px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.text-purple {{ color: #c084fc; }}
+.text-right {{ text-align: right; }}
+.text-center {{ text-align: center; }}
 .muted {{ color: var(--muted); }}
-.msg {{ background: rgba(46,204,113,0.12); color: var(--ok); padding: 0.6rem 1rem; border-radius: 6px; margin-bottom: 1rem; }}
-.hint {{ font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; }}
-code {{ background: #0d0f13; padding: 0.1rem 0.4rem; border-radius: 4px; }}
-ol, ul {{ padding-left: 1.2rem; }}
-ol li, ul li {{ margin-bottom: 0.5rem; }}
-#chatsResult, #sendResult, #restartResult {{ margin-top: 0.75rem; font-size: 0.9rem; }}
-
-.tabs {{ display: flex; gap: 0.25rem; margin-bottom: 1.25rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }}
-.tab-btn {{
-  margin-top: 0; padding: 0.6rem 1.1rem; background: transparent; color: var(--muted);
-  border: none; border-bottom: 2px solid transparent; border-radius: 0; font-weight: 600; cursor: pointer;
+.form-input, .form-select {{
+  width: 100%; padding: 0.55rem 0.75rem; font-size: 0.85rem;
+  background: #090d16; border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+  outline: none; transition: border-color 0.15s;
 }}
-.tab-btn.active {{ color: var(--text); border-bottom-color: var(--accent); }}
-.tab-btn:hover {{ opacity: 1; color: var(--text); }}
-.tab-panel {{ display: none; }}
-.tab-panel.active {{ display: block; }}
-.service-row {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.6rem 0; border-bottom: 1px solid var(--border); }}
-.service-row:last-child {{ border-bottom: none; }}
+.form-input:focus, .form-select:focus {{ border-color: var(--accent); box-shadow: 0 0 0 2px rgba(59,130,246,0.2); }}
+.form-group {{ margin-bottom: 1rem; }}
+.form-group label {{ display: block; font-size: 0.78rem; font-weight: 600; color: var(--muted); margin-bottom: 0.35rem; }}
+.form-hint {{ font-size: 0.72rem; color: #64748b; margin-top: 0.3rem; }}
+.btn {{
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+  padding: 0.55rem 1.1rem; border-radius: 8px; font-size: 0.82rem; font-weight: 600;
+  border: none; cursor: pointer; transition: all 0.15s;
+}}
+.btn-primary {{ background: var(--accent); color: #fff; box-shadow: 0 4px 12px rgba(59,130,246,0.25); }}
+.btn-primary:hover {{ background: var(--accent-hover); }}
+.btn-secondary {{ background: #1c2438; color: var(--text); border: 1px solid var(--border); }}
+.btn-secondary:hover {{ background: #26314a; }}
+.btn-icon-danger {{
+  width: 28px; height: 28px; border-radius: 6px; border: none;
+  background: transparent; color: #f87171; font-weight: bold; cursor: pointer;
+}}
+.btn-icon-danger:hover {{ background: rgba(239,68,68,0.2); color: #ef4444; }}
+.terminal {{
+  background: #060910; border: 1px solid var(--border); border-radius: 10px;
+  padding: 1rem; font-family: ui-monospace, monospace; font-size: 0.75rem;
+  line-height: 1.5; color: #cbd5e1; max-height: 380px; overflow-y: auto; white-space: pre-wrap;
+}}
+.service-item {{
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.9rem 1.1rem; background: #0c111e; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 0.75rem;
+}}
+.service-title {{ font-size: 0.88rem; font-weight: 600; color: #fff; }}
+.service-sub {{ font-size: 0.75rem; color: var(--muted); }}
+.toast-banner {{
+  background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: var(--ok);
+  padding: 0.75rem 1.25rem; border-radius: 10px; font-size: 0.85rem; margin-bottom: 1.25rem;
+}}
+.modal-overlay {{
+  position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+  z-index: 50; display: none; align-items: center; justify-content: center; padding: 1rem;
+}}
+.modal-overlay.active {{ display: flex; }}
+.modal-card {{
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  width: 100%; max-width: 550px; padding: 1.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+}}
+.modal-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border); }}
+.modal-title {{ font-size: 1.05rem; font-weight: 700; color: #fff; }}
+.modal-close {{ background: transparent; border: none; font-size: 1.2rem; color: var(--muted); cursor: pointer; }}
+.modal-close:hover {{ color: #fff; }}
+.toast-notification {{
+  position: fixed; bottom: 1.5rem; right: 1.5rem;
+  background: #0f172a; border: 1px solid #3b82f6; color: #fff;
+  padding: 0.75rem 1.25rem; border-radius: 10px; font-size: 0.82rem; font-weight: 500;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.4); z-index: 60;
+  transform: translateY(100px); opacity: 0; transition: all 0.25s; pointer-events: none;
+}}
+.toast-notification.show {{ transform: translateY(0); opacity: 1; }}
+@media (max-width: 860px) {{
+  .layout {{ flex-direction: column; }}
+  .sidebar {{ width: 100%; flex-direction: row; overflow-x: auto; padding-bottom: 0.5rem; }}
+  .sidebar-section {{ display: none; }}
+  .tab-btn {{ white-space: nowrap; }}
+}}
 </style>
 </head>
 <body>
-<h1>telegram-max-bridge</h1>
-<p class="subtitle">Статус моста, настройка получателей, инструкция и обслуживание</p>
-{message_html}
 
-<div class="card">
-  <div class="status-row">
-    <div>MAX: {connected_badge}</div>
-    <div class="stat">Переслано сообщений: <b>{status.get('forwarded_count', 0)}</b></div>
-    <div class="stat">Маршруты: <b>{html.escape(routes_summary)}</b></div>
-    {"<div class='stat' style='color:var(--err)'>Ошибка: " + html.escape(status.get('last_error') or '') + "</div>" if status.get('last_error') else ''}
-  </div>
-</div>
-
-<div class="tabs">
-  <button class="tab-btn active" onclick="showTab('overview', this)">Обзор</button>
-  <button class="tab-btn" onclick="showTab('routes', this)">Маршруты</button>
-  <button class="tab-btn" onclick="showTab('settings', this)">Настройки</button>
-  <button class="tab-btn" onclick="showTab('maintenance', this)">Обслуживание</button>
-  <button class="tab-btn" onclick="showTab('guide', this)">Инструкция</button>
-</div>
-
-<div id="tab-overview" class="tab-panel active">
-  <div class="card">
-    <h2>Последние пересланные сообщения</h2>
-    <table>
-    <tr><th>MAX chat_id</th><th>текст</th></tr>
-    {recent_rows}
-    </table>
-  </div>
-  <div class="card">
-    <h2>Лог (последние строки)</h2>
-    <pre>{html.escape(log_tail)}</pre>
-  </div>
-</div>
-
-<div id="tab-routes" class="tab-panel">
-  <div class="card">
-    <h2>Маршруты пересылки (Telegram-чат → MAX-чат)</h2>
-    <form method="post" action="/save" id="routesForm">
-      <table id="routesTable">
-        <tr><th>Telegram Chat ID</th><th>MAX Chat ID</th><th>метка</th><th></th></tr>
-        {route_rows}
-      </table>
-      <button type="button" class="secondary" onclick="addRoute()">+ Добавить маршрут</button>
-      <div style="margin-top:1.2rem;">
-        <button type="submit">Сохранить маршруты</button>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-icon">⇄</div>
+    <div>
+      <div class="brand-title">
+        <span>MAX Bridge</span>
+        <span class="badge-version">v1.2</span>
       </div>
-    </form>
-    <p class="hint">После сохранения перезапустите мост (вкладка "Обслуживание"), чтобы изменения применились.</p>
+      <div class="brand-sub">Telegram ↔ MAX Gateway</div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Чаты MAX</h2>
-    <p class="hint" style="margin-top:0;">Аккаунт MAX, залогиненный в мосте, должен уже состоять в нужном чате/группе.</p>
-    <button type="button" class="secondary" onclick="loadChats()">Показать чаты MAX</button>
-    <div id="chatsResult"></div>
+  <div class="top-status">
+    <div>{connected_badge}</div>
+    <button type="button" class="btn btn-secondary" onclick="restartService('bridge')" style="padding:0.4rem 0.8rem; font-size:0.75rem;">
+      ↻ Перезапуск моста
+    </button>
   </div>
+</header>
 
-  <div class="card">
-    <h2>Проверка пересылки</h2>
-    <label>Куда отправить</label>
-    <select id="testTarget">{route_options}</select>
-    <label>Текст тестового сообщения</label>
-    <input id="testText" value="Тестовое сообщение из веб-интерфейса моста">
-    <button type="button" onclick="sendTest()">Отправить тестовое сообщение в MAX</button>
-    <div id="sendResult"></div>
-  </div>
-</div>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-section">Мониторинг</div>
+    <button type="button" class="tab-btn active" onclick="showTab('overview', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
+      <span>Дашборд</span>
+    </button>
+    <button type="button" class="tab-btn" onclick="showTab('routes', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M13 5l7 7-7 7M5 5l7 7-7 7"></path></svg>
+      <span>Маршруты</span>
+    </button>
+    <button type="button" class="tab-btn" onclick="showTab('simulator', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+      <span>Тест отправки</span>
+    </button>
+    <button type="button" class="tab-btn" onclick="showTab('logs', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+      <span>Журнал (Логи)</span>
+    </button>
 
-<div id="tab-settings" class="tab-panel">
-  <div class="card">
-    <h2>Настройки</h2>
-    <form method="post" action="/save" id="settingsForm">
-      <label>TELEGRAM_BOT_TOKEN</label>
-      <input name="TELEGRAM_BOT_TOKEN" value="{html.escape(_mask(settings.telegram_bot_token))}"
-             placeholder="оставьте как есть, если не меняете">
+    <div class="sidebar-section">Система</div>
+    <button type="button" class="tab-btn" onclick="showTab('settings', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+      <span>Настройки .env</span>
+    </button>
+    <button type="button" class="tab-btn" onclick="showTab('maintenance', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg>
+      <span>Службы systemd</span>
+    </button>
+    <button type="button" class="tab-btn" onclick="showTab('guide', this)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
+      <span>Инструкция</span>
+    </button>
+  </aside>
 
-      <label>ALERT_CHAT_ID (личка в Telegram, куда слать алерты о сбоях, необязательно)</label>
-      <input name="ALERT_CHAT_ID" value="{settings.alert_chat_id or ''}">
+  <main class="main-content">
+    {message_html}
 
-      <label>ALERT_DISCONNECT_SECONDS (через сколько секунд простоя MAX слать алерт)</label>
-      <input name="ALERT_DISCONNECT_SECONDS" value="{settings.alert_disconnect_seconds}">
-
-      <label>Антифлуд: максимум сообщений...</label>
-      <input name="RATE_LIMIT_MAX" value="{settings.rate_limit_max}" placeholder="напр. 20">
-      <label>...за сколько секунд (на один чат-источник, лишнее отбрасывается)</label>
-      <input name="RATE_LIMIT_WINDOW_SECONDS" value="{settings.rate_limit_window_seconds}" placeholder="напр. 60">
-
-      <label>Пересылать ответы из MAX обратно в Telegram</label>
-      <select name="REVERSE_FORWARD_ENABLED">
-        <option value="true" {"selected" if settings.reverse_forward_enabled else ""}>Включено</option>
-        <option value="false" {"selected" if not settings.reverse_forward_enabled else ""}>Выключено</option>
-      </select>
-
-      <label>Мониторинг хоста: порог диска, % (алерт при превышении)</label>
-      <input name="DISK_ALERT_PERCENT" value="{settings.disk_alert_percent:g}" placeholder="напр. 90">
-      <label>Мониторинг хоста: порог памяти, %</label>
-      <input name="MEM_ALERT_PERCENT" value="{settings.mem_alert_percent:g}" placeholder="напр. 90">
-
-      <div style="margin-top:1.2rem;">
-        <button type="submit">Сохранить настройки</button>
+    <!-- TAB: OVERVIEW / DASHBOARD -->
+    <div id="tab-overview" class="tab-panel active">
+      <div class="metrics-grid">
+        <div class="metric-box">
+          <div class="metric-label">Переслано сообщений</div>
+          <div class="metric-val">{status.get('forwarded_count', 0)}</div>
+          <div class="metric-sub">Сквозной транзит TG ↔ MAX</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Активные маршруты</div>
+          <div class="metric-val">{len(settings.routes)}</div>
+          <div class="metric-sub">{html.escape(routes_summary)}</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Антифлуд (Rate Limit)</div>
+          <div class="metric-val">{settings.rate_limit_max}</div>
+          <div class="metric-sub">Лимит за {settings.rate_limit_window_seconds}с на чат</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Статус соединения</div>
+          <div class="metric-val" style="font-size:1.15rem; margin-top:0.35rem;">
+            {"<span style='color:var(--ok)'>Онлайн</span>" if connected else "<span style='color:var(--err)'>Отключен</span>"}
+          </div>
+          <div class="metric-sub">
+            {"<span style='color:var(--err)'>Ошибка: " + html.escape(status.get('last_error') or '') + "</span>" if status.get('last_error') else "Ошибок не зафиксировано"}
+          </div>
+        </div>
       </div>
-    </form>
-    <p class="hint">После сохранения перезапустите мост (вкладка "Обслуживание"), чтобы изменения применились.</p>
-  </div>
-</div>
 
-<div id="tab-maintenance" class="tab-panel">
-  <div class="card">
-    <h2>Сервисы</h2>
-    <p class="hint" style="margin-top:0;">Работает только на сервере (systemd) — локально при разработке кнопки вернут ошибку, это нормально.</p>
-    <div id="serviceStatus">
-      <div class="service-row">
-        <div>Мост (telegram-max-bridge) — <span id="status-bridge" class="muted">проверка...</span></div>
-        <button type="button" class="secondary" onclick="restartService('bridge')">Перезапустить</button>
-      </div>
-      <div class="service-row">
-        <div>Веб-интерфейс (telegram-max-bridge-web) — <span id="status-webui" class="muted">проверка...</span></div>
-        <button type="button" class="secondary" onclick="restartService('webui')">Перезапустить</button>
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Лента последних сообщений</div>
+            <div class="card-desc">Хронология пересылки между Telegram и MAX в реальном времени</div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:90px;">Время</th>
+                <th style="width:110px;">Канал</th>
+                <th style="width:140px;">Chat ID</th>
+                <th>Содержимое</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent_rows}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
-    <button type="button" class="secondary" onclick="loadServiceStatus()">Обновить статус</button>
-    <div id="restartResult"></div>
-    <p class="hint">Для работы кнопок нужны права sudo для пользователя, от которого запущен веб-интерфейс —
-    см. раздел про <code>deploy/bridge-sudoers</code> в README.</p>
+
+    <!-- TAB: ROUTES -->
+    <div id="tab-routes" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Маршруты пересылки</div>
+            <div class="card-desc">Связывание групп Telegram и чатов MAX для двусторонней трансляции</div>
+          </div>
+          <div style="display:flex; gap:0.6rem;">
+            <button type="button" class="btn btn-secondary" onclick="openChatPicker()">
+              🔍 Показать чаты MAX
+            </button>
+            <button type="button" class="btn btn-secondary" onclick="addRouteRow()">
+              + Добавить строку
+            </button>
+          </div>
+        </div>
+
+        <form method="post" action="/save" id="routesForm">
+          <div class="table-wrap" style="margin-bottom:1.25rem;">
+            <table id="routesTable">
+              <thead>
+                <tr>
+                  <th style="width:30%;">Telegram Chat ID</th>
+                  <th style="width:30%;">MAX Chat ID</th>
+                  <th>Метка (название)</th>
+                  <th style="width:50px;"></th>
+                </tr>
+              </thead>
+              <tbody id="routesListBody">
+                {route_rows}
+              </tbody>
+            </table>
+          </div>
+
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <p class="form-hint">После сохранения перезапустите мост (кнопка вверху или вкладка "Службы systemd"), чтобы применить маршруты.</p>
+            <button type="submit" class="btn btn-primary">Сохранить маршруты</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- TAB: SIMULATOR (TEST SEND) -->
+    <div id="tab-simulator" class="tab-panel">
+      <div class="card" style="max-width:700px;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Тестовая отправка сообщения</div>
+            <div class="card-desc">Проверка доставки в чат MAX напрямую через шлюз моста</div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Целевой чат MAX</label>
+          <select id="testTarget" class="form-select">
+            {route_options}
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Текст сообщения</label>
+          <textarea id="testText" class="form-input font-mono" rows="4" style="resize:vertical;">Тестовое сообщение из панели управления Telegram ↔ MAX Bridge</textarea>
+        </div>
+
+        <div style="margin-top:1.25rem; display:flex; align-items:center; gap:1rem;">
+          <button type="button" class="btn btn-primary" onclick="sendTest()">
+            Отправить тестовое сообщение
+          </button>
+          <div id="sendResult"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: LOGS -->
+    <div id="tab-logs" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Журнал событий (bridge.log)</div>
+            <div class="card-desc">Последние записи лога работы моста</div>
+          </div>
+        </div>
+        <pre class="terminal">{html.escape(log_tail)}</pre>
+      </div>
+    </div>
+
+    <!-- TAB: SETTINGS -->
+    <div id="tab-settings" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Параметры конфигурации (.env)</div>
+            <div class="card-desc">Управление ключами, порогами алертов и параметрами антифлуда</div>
+          </div>
+        </div>
+
+        <form method="post" action="/save" id="settingsForm">
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:1.25rem;">
+            <div class="form-group">
+              <label>TELEGRAM_BOT_TOKEN</label>
+              <input name="TELEGRAM_BOT_TOKEN" value="{html.escape(_mask(settings.telegram_bot_token))}" class="form-input font-mono" placeholder="оставьте как есть, если не меняете">
+              <div class="form-hint">Токен бота от @BotFather (маскируется при чтении)</div>
+            </div>
+
+            <div class="form-group">
+              <label>ALERT_CHAT_ID (TG ID для алертов)</label>
+              <input name="ALERT_CHAT_ID" value="{settings.alert_chat_id or ''}" class="form-input font-mono" placeholder="необязательно">
+              <div class="form-hint">Личный чат или канал для оповещений о сбоях</div>
+            </div>
+
+            <div class="form-group">
+              <label>ALERT_DISCONNECT_SECONDS</label>
+              <input name="ALERT_DISCONNECT_SECONDS" value="{settings.alert_disconnect_seconds}" class="form-input font-mono">
+              <div class="form-hint">Таймаут разрыва с MAX для отправки алерта</div>
+            </div>
+
+            <div class="form-group">
+              <label>Антифлуд: максимум сообщений</label>
+              <input name="RATE_LIMIT_MAX" value="{settings.rate_limit_max}" class="form-input font-mono">
+              <div class="form-hint">Лимит событий на один чат-источник</div>
+            </div>
+
+            <div class="form-group">
+              <label>Антифлуд: временное окно (секунды)</label>
+              <input name="RATE_LIMIT_WINDOW_SECONDS" value="{settings.rate_limit_window_seconds}" class="form-input font-mono">
+              <div class="form-hint">Ширина скользящего окна rate-limit</div>
+            </div>
+
+            <div class="form-group">
+              <label>Обратная пересылка (MAX → Telegram)</label>
+              <select name="REVERSE_FORWARD_ENABLED" class="form-select">
+                <option value="true" {"selected" if settings.reverse_forward_enabled else ""}>Включено (двусторонний мост)</option>
+                <option value="false" {"selected" if not settings.reverse_forward_enabled else ""}>Выключено (только TG → MAX)</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label>Порог диска VPS (%)</label>
+              <input name="DISK_ALERT_PERCENT" value="{settings.disk_alert_percent:g}" class="form-input font-mono">
+              <div class="form-hint">Алерт при превышении занятости диска</div>
+            </div>
+
+            <div class="form-group">
+              <label>Порог памяти VPS (%)</label>
+              <input name="MEM_ALERT_PERCENT" value="{settings.mem_alert_percent:g}" class="form-input font-mono">
+              <div class="form-hint">Алерт при нехватке оперативной памяти</div>
+            </div>
+          </div>
+
+          <div style="margin-top:1.5rem; display:flex; justify-content:space-between; align-items:center;">
+            <p class="form-hint">После сохранения перезапустите мост на вкладке "Службы systemd".</p>
+            <button type="submit" class="btn btn-primary">Сохранить настройки</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- TAB: MAINTENANCE -->
+    <div id="tab-maintenance" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Службы systemd</div>
+            <div class="card-desc">Управление демонами моста на сервере Linux VPS</div>
+          </div>
+          <button type="button" class="btn btn-secondary" onclick="loadServiceStatus()">
+            Обновить статус
+          </button>
+        </div>
+
+        <div id="serviceStatus">
+          <div class="service-item">
+            <div>
+              <div class="service-title">telegram-max-bridge</div>
+              <div class="service-sub">Основной сервис: Telegram-бот, WebClient MAX, HTTP API</div>
+            </div>
+            <div style="display:flex; align-items:center; gap:1rem;">
+              <span id="status-bridge" class="muted font-mono">проверка...</span>
+              <button type="button" class="btn btn-secondary" onclick="restartService('bridge')">Перезапустить</button>
+            </div>
+          </div>
+
+          <div class="service-item">
+            <div>
+              <div class="service-title">telegram-max-bridge-web</div>
+              <div class="service-sub">Веб-панель управления (порт {settings.webui_port})</div>
+            </div>
+            <div style="display:flex; align-items:center; gap:1rem;">
+              <span id="status-webui" class="muted font-mono">проверка...</span>
+              <button type="button" class="btn btn-secondary" onclick="restartService('webui')">Перезапустить</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="restartResult" style="margin-top:0.75rem;"></div>
+        <p class="form-hint" style="margin-top:1rem;">
+          Для работы перезапуска требуются правила sudoers на сервере (файл <code>deploy/bridge-sudoers</code>). Локально в разработке кнопки возвращают ошибку — это ожидаемо.
+        </p>
+      </div>
+    </div>
+
+    <!-- TAB: GUIDE -->
+    <div id="tab-guide" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Инструкция по настройке моста</div>
+            <div class="card-desc">Пошаговое руководство по связыванию Telegram и MAX</div>
+          </div>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:1rem; font-size:0.85rem; line-height:1.6;">
+          <div style="padding:1rem; background:#0c111e; border:1px solid var(--border); border-radius:10px;">
+            <b style="color:#60a5fa;">Шаг 1. Создание Telegram-бота</b>
+            <p class="muted">Напишите @BotFather в Telegram команду <code>/newbot</code>. Скопируйте полученный токен и вставьте в поле <code>TELEGRAM_BOT_TOKEN</code> на вкладке "Настройки .env".</p>
+          </div>
+
+          <div style="padding:1rem; background:#0c111e; border:1px solid var(--border); border-radius:10px;">
+            <b style="color:#60a5fa;">Шаг 2. Настройка приватности в Telegram</b>
+            <p class="muted">В @BotFather перейдите в <code>/mybots</code> → выберите бота → <b>Bot Settings → Group Privacy → Turn off</b>. Добавьте бота в нужную группу Telegram (если бот уже состоял в группе, удалите его и добавьте заново).</p>
+          </div>
+
+          <div style="padding:1rem; background:#0c111e; border:1px solid var(--border); border-radius:10px;">
+            <b style="color:#60a5fa;">Шаг 3. Определение Telegram Chat ID</b>
+            <p class="muted">Напишите сообщение в группу, затем откройте в браузере: <code>https://api.telegram.org/bot&lt;ТОКЕН&gt;/getUpdates</code>. Найдите <code>"chat":{{"id": -100xxxxxxx}}</code>.</p>
+          </div>
+
+          <div style="padding:1rem; background:#0c111e; border:1px solid var(--border); border-radius:10px;">
+            <b style="color:#60a5fa;">Шаг 4. Настройка маршрута</b>
+            <p class="muted">На вкладке "Маршруты" нажмите "Показать чаты MAX", выберите чат и укажите Telegram Chat ID. Нажмите "Сохранить маршруты" и перезапустите мост.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Modal: MAX Chat Picker -->
+<div id="chatModal" class="modal-overlay">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title">Доступные чаты MAX</div>
+      <button type="button" class="modal-close" onclick="closeChatPicker()">✕</button>
+    </div>
+    <div id="chatsResult" style="max-height:350px; overflow-y:auto;">
+      <p class="muted">Загрузка...</p>
+    </div>
   </div>
 </div>
 
-<div id="tab-guide" class="tab-panel">
-  <div class="card">
-    <h2>Как всё это работает</h2>
-    <p>Мост слушает сообщения в Telegram-группах (через обычного Telegram-бота) и пересылает их в
-    указанные чаты/группы MAX (через личный аккаунт MAX, залогиненный по QR-коду). Также есть
-    HTTP API для прямой пересылки в MAX в обход Telegram — полезно, если другой сервис (например,
-    ваш сайт) шлёт уведомления в ту же Telegram-группу через своего бота: Telegram не показывает
-    ботам сообщения других ботов, поэтому такие уведомления нужно слать напрямую через API.</p>
-  </div>
-
-  <div class="card">
-    <h2>Шаг 1. Создать Telegram-бота</h2>
-    <ol>
-      <li>Откройте @BotFather в Telegram, отправьте <code>/newbot</code>, следуйте инструкциям</li>
-      <li>Скопируйте выданный токен вида <code>123456:AAAbbbCCCddd...</code></li>
-      <li>Впишите его во вкладке "Настройки" в поле <code>TELEGRAM_BOT_TOKEN</code></li>
-    </ol>
-  </div>
-
-  <div class="card">
-    <h2>Шаг 2. Добавить бота в нужную Telegram-группу</h2>
-    <ol>
-      <li>Откройте группу в Telegram → участники → "Добавить участников" → найдите вашего бота</li>
-      <li>Выключите ему Privacy Mode: @BotFather → <code>/mybots</code> → выбрать бота →
-        Bot Settings → Group Privacy → Turn off (иначе бот не увидит обычные сообщения)</li>
-      <li><b>Важно:</b> если бот уже был в группе до выключения Privacy Mode, настройка не применится
-        задним числом — удалите бота из группы и добавьте заново</li>
-    </ol>
-  </div>
-
-  <div class="card">
-    <h2>Шаг 3. Узнать Telegram Chat ID</h2>
-    <ol>
-      <li>Напишите любое сообщение в группу (после шага 2)</li>
-      <li>Откройте в браузере: <code>https://api.telegram.org/bot&lt;ТОКЕН&gt;/getUpdates</code></li>
-      <li>Найдите в ответе <code>"chat":{{"id": ...}}</code> — для групп обычно отрицательное число</li>
-      <li>Если ответ пустой (<code>"result":[]</code>) — напишите новое сообщение в группу и запросите снова
-        (getUpdates показывает только новые сообщения)</li>
-    </ol>
-  </div>
-
-  <div class="card">
-    <h2>Шаг 4. Узнать MAX Chat ID и создать маршрут</h2>
-    <ol>
-      <li>Аккаунт MAX, под которым залогинен мост, должен состоять в нужном чате/группе MAX</li>
-      <li>Во вкладке "Маршруты" нажмите "Показать чаты MAX" — появится список с id и названиями</li>
-      <li>Нажмите "Выбрать" у нужного чата — добавится строка в таблицу маршрутов</li>
-      <li>Впишите в ту же строку Telegram Chat ID из шага 3</li>
-      <li>Нажмите "Сохранить маршруты", затем перезапустите мост на вкладке "Обслуживание"</li>
-    </ol>
-    <p class="hint">Можно настроить несколько маршрутов одновременно — разные группы Telegram
-    в разные чаты MAX. Фото и документы пересылаются вместе с текстом; служебные сообщения
-    (участник добавлен/вышел и т.п.) не пересылаются.</p>
-  </div>
-
-  <div class="card">
-    <h2>Шаг 5. Проверить</h2>
-    <p>Во вкладке "Маршруты" внизу — "Отправить тестовое сообщение в MAX", либо напишите
-    реальное сообщение в Telegram-группу и проверьте, пришло ли оно в MAX.</p>
-  </div>
-
-  <div class="card">
-    <h2>Дополнительно: прямая пересылка через HTTP (для других сервисов)</h2>
-    <p>Если у вас есть сайт/сервис, который тоже шлёт уведомления в ту же Telegram-группу через
-    своего бота — Telegram не даст мосту увидеть эти сообщения. Решение — слать их в MAX
-    напрямую, минуя Telegram:</p>
-    <pre>curl -X POST http://&lt;ip-сервера&gt;:&lt;FORWARD_PORT&gt;/forward \\
-  -H "Authorization: Bearer &lt;FORWARD_TOKEN&gt;" \\
-  -H "Content-Type: application/json" \\
-  -d '{{"text": "Текст сообщения"}}'</pre>
-    <p class="hint">Опционально можно передать <code>max_chat_id</code> в теле запроса, чтобы
-    переопределить получателя — иначе используется первый маршрут из списка.
-    <code>FORWARD_TOKEN</code> и <code>FORWARD_PORT</code> — в файле <code>.env</code> на сервере.</p>
-  </div>
-
-  <div class="card">
-    <h2>Частые проблемы</h2>
-    <ul>
-      <li><b>Сообщение не приходит в MAX, хотя бот видит его в Telegram</b> — проверьте, что для
-      этой Telegram-группы настроен маршрут (вкладка "Маршруты"), и что MAX-аккаунт состоит в
-      целевом чате MAX</li>
-      <li><b>Пусто в getUpdates</b> — отправьте новое сообщение в группу после последних изменений
-      настроек privacy, запросите снова</li>
-      <li><b>Уведомления от другого бота (не Telegram-бота этого моста) не долетают</b> — это
-      ограничение Telegram (боты не видят сообщения других ботов), используйте HTTP API выше</li>
-      <li><b>MAX пишет "Bot has restriction to input"</b> — сессия MAX не может писать в личку
-      самой себе ("Избранное"), выберите обычный чат/группу</li>
-    </ul>
-  </div>
-</div>
+<!-- Toast notification -->
+<div id="toast" class="toast-notification">Уведомление</div>
 
 <script>
 function esc(s) {{
   return String(s ?? '').replace(/[&<>"']/g, ch => ({{
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }})[ch]);
+}}
+
+function showToast(text) {{
+  const t = document.getElementById('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
 }}
 
 function setMsg(el, color, text) {{
@@ -504,14 +784,24 @@ function setMsg(el, color, text) {{
 function showTab(name, btn) {{
   document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  btn.classList.add('active');
+  const panel = document.getElementById('tab-' + name);
+  if (panel) panel.classList.add('active');
+  if (btn) btn.classList.add('active');
   if (name === 'maintenance') {{ loadServiceStatus(); }}
+}}
+
+function openChatPicker() {{
+  document.getElementById('chatModal').classList.add('active');
+  loadChats();
+}}
+
+function closeChatPicker() {{
+  document.getElementById('chatModal').classList.remove('active');
 }}
 
 async function loadChats() {{
   const el = document.getElementById('chatsResult');
-  setMsg(el, null, 'Загрузка...');
+  setMsg(el, null, 'Загрузка списка чатов...');
   try {{
     const r = await fetch('/api/chats');
     const data = await r.json();
@@ -523,14 +813,17 @@ async function loadChats() {{
       setMsg(el, null, 'Чатов не найдено');
       return;
     }}
-    // Названия чатов задают посторонние люди в MAX — всё экранируем.
     const rows = data.chats.map(c =>
-      `<tr><td>${{esc(c.id)}}</td><td>${{esc(c.type)}}</td><td>${{esc(c.title || '(без названия)')}}</td>` +
-      `<td><button type="button" class="secondary choose-chat" data-id="${{esc(c.id)}}" data-title="${{esc(c.title || '')}}">Выбрать</button></td></tr>`
+      `<tr><td class="font-mono text-purple">${{esc(c.id)}}</td><td>${{esc(c.type)}}</td><td>${{esc(c.title || '(без названия)')}}</td>` +
+      `<td class="text-right"><button type="button" class="btn btn-secondary choose-chat" style="padding:0.3rem 0.6rem; font-size:0.75rem;" data-id="${{esc(c.id)}}" data-title="${{esc(c.title || '')}}">Выбрать</button></td></tr>`
     ).join('');
-    el.innerHTML = '<table><tr><th>id</th><th>тип</th><th>название</th><th></th></tr>' + rows + '</table>';
+    el.innerHTML = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Тип</th><th>Название</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
     el.querySelectorAll('.choose-chat').forEach(b =>
-      b.addEventListener('click', () => addRoute(null, b.dataset.id, b.dataset.title))
+      b.addEventListener('click', () => {{
+        addRoute(null, b.dataset.id, b.dataset.title);
+        closeChatPicker();
+        showToast('Чат добавлен в таблицу маршрутов');
+      }})
     );
   }} catch (e) {{
     setMsg(el, 'var(--err)', 'Ошибка запроса: ' + e);
@@ -538,14 +831,18 @@ async function loadChats() {{
 }}
 
 function addRoute(tgId, maxId, label) {{
-  const table = document.getElementById('routesTable');
+  const tbody = document.getElementById('routesListBody');
   const tr = document.createElement('tr');
   tr.innerHTML =
-    `<td><input name="route_tg" value="${{esc(tgId)}}"></td>` +
-    `<td><input name="route_max" value="${{esc(maxId)}}"></td>` +
-    `<td><input name="route_label" value="${{esc(label)}}" placeholder="метка (необязательно)"></td>` +
-    `<td><button type="button" class="secondary" onclick="this.closest('tr').remove()">✕</button></td>`;
-  table.appendChild(tr);
+    `<td><input name="route_tg" value="${{esc(tgId)}}" class="form-input font-mono" placeholder="ID группы TG"></td>` +
+    `<td><input name="route_max" value="${{esc(maxId)}}" class="form-input font-mono" placeholder="ID чата MAX"></td>` +
+    `<td><input name="route_label" value="${{esc(label)}}" class="form-input" placeholder="метка (необязательно)"></td>` +
+    `<td class="text-right"><button type="button" class="btn-icon-danger" onclick="this.closest('tr').remove()" title="Удалить">✕</button></td>`;
+  tbody.appendChild(tr);
+}}
+
+function addRouteRow() {{
+  addRoute('', '', '');
 }}
 
 async function sendTest() {{
@@ -565,6 +862,7 @@ async function sendTest() {{
       return;
     }}
     setMsg(el, 'var(--ok)', 'Отправлено успешно');
+    showToast('Тестовое сообщение успешно отправлено!');
   }} catch (e) {{
     setMsg(el, 'var(--err)', 'Ошибка запроса: ' + e);
   }}
@@ -578,17 +876,16 @@ async function loadServiceStatus() {{
       const el = document.getElementById('status-' + key);
       const val = data[key] || 'unknown';
       el.textContent = val;
-      el.className = val === 'active' ? '' : 'muted';
       el.style.color = val === 'active' ? 'var(--ok)' : 'var(--err)';
     }}
   }} catch (e) {{
-    // тихо игнорируем — например, локально без sudo/systemctl
+    // тихо игнорируем
   }}
 }}
 
 async function restartService(key) {{
   const el = document.getElementById('restartResult');
-  setMsg(el, null, 'Перезапуск...');
+  setMsg(el, null, 'Перезапуск сервиса...');
   try {{
     const r = await fetch('/api/restart/' + key, {{ method: 'POST' }});
     const data = await r.json();
@@ -597,6 +894,7 @@ async function restartService(key) {{
       return;
     }}
     setMsg(el, 'var(--ok)', data.note || 'Перезапущено');
+    showToast('Команда перезапуска отправлена');
     setTimeout(loadServiceStatus, 3000);
   }} catch (e) {{
     setMsg(el, 'var(--err)', 'Ошибка запроса: ' + e);
