@@ -138,6 +138,16 @@ async def _run_systemctl(action: str, unit: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+SUDO_HINT = (
+    "Нет прав на управление сервисами: установите правило sudo "
+    "из deploy/bridge-sudoers (см. README, раздел про кнопки перезапуска)"
+)
+
+
+def is_sudo_failure(out: str) -> bool:
+    return out.lstrip().lower().startswith("sudo:")
+
+
 def render_page(settings: Settings, message: str | None = None) -> str:
     status = read_status(settings.status_file)
     log_tail = ""
@@ -1009,7 +1019,10 @@ async def api_service_status(_: None = Depends(check_auth)) -> JSONResponse:
     result: dict[str, str] = {}
     for key, unit in SERVICE_UNITS.items():
         ok, out = await _run_systemctl("is-active", unit)
-        result[key] = out.strip() if out.strip() else ("active" if ok else "unknown")
+        if is_sudo_failure(out):
+            result[key] = "нет прав sudo"
+        else:
+            result[key] = out.strip() if out.strip() else ("active" if ok else "unknown")
     return JSONResponse(result)
 
 
@@ -1033,6 +1046,8 @@ async def api_restart(key: str, _: None = Depends(check_auth)) -> JSONResponse:
 
     ok, out = await _run_systemctl("restart", unit)
     if not ok:
+        if is_sudo_failure(out):
+            return JSONResponse({"error": SUDO_HINT}, status_code=500)
         return JSONResponse({"error": out[-2000:] or "не удалось перезапустить"}, status_code=500)
     return JSONResponse({"ok": True})
 

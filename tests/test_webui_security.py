@@ -118,3 +118,22 @@ def test_page_escapes_chat_titles_client_side(client):
     html_text = client.get("/", auth=AUTH).text
     assert "function esc(" in html_text
     assert "onclick=\"addRoute(null, ${c.id}" not in html_text
+
+
+def test_service_status_reports_missing_sudo_nicely(client, monkeypatch):
+    async def fake(action, unit):
+        return False, "sudo: a password is required\n"
+
+    monkeypatch.setattr(webui, "_run_systemctl", fake)
+    data = client.get("/api/service-status", auth=AUTH).json()
+    assert data == {"bridge": "нет прав sudo", "webui": "нет прав sudo"}
+
+
+def test_restart_reports_missing_sudo_with_hint(client, monkeypatch):
+    async def fake(action, unit):
+        return False, "sudo: a password is required\n"
+
+    monkeypatch.setattr(webui, "_run_systemctl", fake)
+    r = client.post("/api/restart/bridge", auth=AUTH)
+    assert r.status_code == 500
+    assert "bridge-sudoers" in r.json()["error"]

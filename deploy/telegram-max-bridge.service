@@ -10,6 +10,7 @@ WorkingDirectory=/opt/telegram-max-bridge
 ExecStart=/opt/telegram-max-bridge/.venv/bin/python -m bridge.main
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target

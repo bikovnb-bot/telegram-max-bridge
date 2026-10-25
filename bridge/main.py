@@ -507,6 +507,25 @@ def build_forward_api(
     return app
 
 
+async def run_until_first_done(*coros, cancel_timeout: float = 10.0) -> None:
+    """Ждёт первую завершившуюся задачу, остальные отменяет, её ошибку пробрасывает.
+
+    По SIGTERM aiogram завершает polling, а остальные бесконечные задачи иначе
+    держали бы процесс, пока systemd не убьёт его через 90 секунд.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait(tasks, timeout=cancel_timeout)
+
+    for task in done:
+        if not task.cancelled() and task.exception() is not None:
+            raise task.exception()
+
+
 async def main() -> None:
     settings = Settings.from_env()
     setup_logging(settings.log_file)
@@ -565,14 +584,18 @@ async def main() -> None:
         len(settings.routes),
     )
     tasks = [
-        max_client.start(),
         tg_dp.start_polling(tg_bot),
+        max_client.start(),
         alerts.watch_disconnect(),
     ]
     if settings.host_monitor_enabled:
         tasks.append(host_monitor.watch())
 
-    await asyncio.gather(*tasks)
+    try:
+        await run_until_first_done(*tasks)
+    finally:
+        await runner.cleanup()
+        await tg_bot.session.close()
 
 
 if __name__ == "__main__":
