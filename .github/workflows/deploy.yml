@@ -36,6 +36,8 @@ jobs:
             git fetch origin
             git reset --hard origin/main
             chown -R bridge:bridge bridge requirements.txt deploy README.md .gitignore .env.example .git
+            [ -f .env ] && chmod 600 .env
+            [ -d max_session ] && chmod 700 max_session
             sudo -u bridge /opt/telegram-max-bridge/.venv/bin/pip install -q -r requirements.txt
             systemctl restart telegram-max-bridge
             systemctl restart telegram-max-bridge-web

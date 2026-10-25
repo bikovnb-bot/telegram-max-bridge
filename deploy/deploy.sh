@@ -38,6 +38,10 @@ sudo tar -xzf /tmp/bridge-deploy.tar.gz -C "$REMOTE_DIR"
 sudo chown -R bridge:bridge "$REMOTE_DIR/bridge" "$REMOTE_DIR/requirements.txt" "$REMOTE_DIR/deploy" "$REMOTE_DIR/README.md"
 rm -f /tmp/bridge-deploy.tar.gz
 
+# .env и сессия MAX содержат токены — закрываем от остальных пользователей.
+[ -f "$REMOTE_DIR/.env" ] && sudo chmod 600 "$REMOTE_DIR/.env"
+[ -d "$REMOTE_DIR/max_session" ] && sudo chmod 700 "$REMOTE_DIR/max_session"
+
 echo "--> Обновляю зависимости..."
 sudo -u bridge "$REMOTE_DIR/.venv/bin/pip" install -q -r "$REMOTE_DIR/requirements.txt"
 

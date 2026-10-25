@@ -31,3 +31,13 @@ def test_should_alert_throttles():
     rl = RateLimiter(max_events=1, window_seconds=60)
     assert rl.should_alert("k") is True
     assert rl.should_alert("k") is False
+
+
+def test_rate_limiter_evicts_stale_keys():
+    rl = RateLimiter(max_events=1, window_seconds=0.05)
+    rl.MAX_KEYS = 10
+    for i in range(30):
+        rl.allow(f"k{i}")
+    time.sleep(0.1)
+    rl.allow("fresh")
+    assert len(rl._events) <= 2

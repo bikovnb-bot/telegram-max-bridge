@@ -47,8 +47,24 @@ def _parse_routes(
     return routes
 
 
+def clean_label(label: str) -> str:
+    """Убирает из метки маршрута разделители формата ROUTES и управляющие символы."""
+    cleaned = "".join(ch for ch in label if ch not in ":;" and ch.isprintable())
+    return cleaned.strip()
+
+
+def clean_env_value(value: str) -> str:
+    """Убирает переводы строк и прочие управляющие символы из значения для .env.
+
+    Иначе значение с \n дописало бы в файл произвольные переменные.
+    """
+    return "".join(ch for ch in value if ch.isprintable()).strip()
+
+
 def serialize_routes(routes: list[Route]) -> str:
-    return ";".join(f"{r.telegram_chat_id}:{r.max_chat_id}:{r.label}" for r in routes)
+    return ";".join(
+        f"{r.telegram_chat_id}:{r.max_chat_id}:{clean_label(r.label)}" for r in routes
+    )
 
 
 @dataclass(frozen=True)
@@ -159,4 +175,4 @@ def update_env(values: dict[str, str]) -> None:
     for key, value in values.items():
         if key not in _ENV_KEYS:
             continue
-        set_key(ENV_PATH, key, value, quote_mode="never")
+        set_key(ENV_PATH, key, clean_env_value(value), quote_mode="never")

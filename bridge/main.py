@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import shutil
 import time
 from logging.handlers import RotatingFileHandler
@@ -185,14 +186,30 @@ class RateLimiter:
     сообщения выше max_events за window_seconds просто отбрасываются.
     """
 
+    MAX_KEYS = 1024
+
     def __init__(self, max_events: int, window_seconds: int) -> None:
         self.max_events = max_events
         self.window_seconds = window_seconds
         self._events: dict[str, list[float]] = {}
         self._last_alert: dict[str, float] = {}
 
+    def _evict_stale(self, now: float) -> None:
+        """Не даёт словарям расти бесконечно при потоке уникальных ключей."""
+        if len(self._events) > self.MAX_KEYS:
+            self._events = {
+                k: v for k, v in self._events.items()
+                if v and now - v[-1] <= self.window_seconds
+            }
+        if len(self._last_alert) > self.MAX_KEYS:
+            self._last_alert = {
+                k: t for k, t in self._last_alert.items()
+                if now - t < self.window_seconds
+            }
+
     def allow(self, key: str) -> bool:
         now = time.time()
+        self._evict_stale(now)
         events = self._events.setdefault(key, [])
         while events and now - events[0] > self.window_seconds:
             events.pop(0)
@@ -241,16 +258,38 @@ async def send_to_max(
     logger.info("переслано сообщение -> max_chat_id=%s", chat_id)
 
 
+# Файл целиком читается в память, поэтому слишком большие не скачиваем.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+
+def _too_large(size: int | None) -> bool:
+    return size is not None and size > MAX_ATTACHMENT_BYTES
+
+
 async def _build_attachments(message: TgMessage) -> list:
     attachments: list = []
     if message.photo:
         largest = message.photo[-1]
+        if _too_large(largest.file_size):
+            logger.warning("фото %s байт больше лимита, вложение пропущено", largest.file_size)
+            return attachments
         buf = await message.bot.download(largest)
-        attachments.append(Photo(raw=buf.read(), name="photo.jpg"))
+        raw = buf.read()
+        if _too_large(len(raw)):
+            return attachments
+        attachments.append(Photo(raw=raw, name="photo.jpg"))
     elif message.document:
+        if _too_large(message.document.file_size):
+            logger.warning(
+                "документ %s байт больше лимита, вложение пропущено", message.document.file_size
+            )
+            return attachments
         buf = await message.bot.download(message.document)
+        raw = buf.read()
+        if _too_large(len(raw)):
+            return attachments
         name = message.document.file_name or "file"
-        attachments.append(File(raw=buf.read(), name=name))
+        attachments.append(File(raw=raw, name=name))
     return attachments
 
 
@@ -387,7 +426,9 @@ def build_forward_api(
                 {"error": "FORWARD_TOKEN не настроен на сервере"}, status=500
             )
         auth = request.headers.get("Authorization", "")
-        if auth != f"Bearer {settings.forward_token}":
+        if not secrets.compare_digest(
+            auth.encode("utf-8"), f"Bearer {settings.forward_token}".encode("utf-8")
+        ):
             return web.json_response({"error": "unauthorized"}, status=401)
         return None
 

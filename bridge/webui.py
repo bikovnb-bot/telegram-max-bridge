@@ -10,6 +10,7 @@ import asyncio
 import html
 import os
 import secrets
+from urllib.parse import urlsplit
 
 import aiohttp
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -17,11 +18,45 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 
-from .config import Route, Settings, serialize_routes, update_env
+from .config import Route, Settings, clean_label, serialize_routes, update_env
 from .status import read_status
 
 app = FastAPI(title="telegram-max-bridge")
 security = HTTPBasic()
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def is_same_origin_request(method: str, headers) -> bool:
+    """Защита от CSRF: запрос, меняющий состояние, должен идти с нашего же origin.
+
+    Basic Auth браузер подставляет сам, в том числе в запросы с чужой страницы,
+    поэтому сверяем Sec-Fetch-Site / Origin. Запросы без этих заголовков
+    (curl, скрипты) пропускаем — их не инициирует браузер администратора.
+    """
+    if method.upper() in SAFE_METHODS:
+        return True
+    fetch_site = headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site not in ("same-origin", "none"):
+        return False
+    origin = headers.get("origin")
+    if origin is not None:
+        if origin == "null":
+            return False
+        return urlsplit(origin).netloc == headers.get("host", "")
+    return True
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    if not is_same_origin_request(request.method, request.headers):
+        return JSONResponse({"error": "cross-origin request blocked"}, status_code=403)
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
 
 SERVICE_UNITS = {
     "bridge": "telegram-max-bridge",
@@ -44,6 +79,21 @@ def check_auth(credentials: HTTPBasicCredentials = Depends(security)) -> None:
             detail="Неверный логин/пароль",
             headers={"WWW-Authenticate": "Basic"},
         )
+
+
+def _is_int(raw: str) -> bool:
+    try:
+        int(raw)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_percent(raw: str) -> bool:
+    try:
+        return 0 < float(raw) <= 100
+    except ValueError:
+        return False
 
 
 def _mask(value: str, keep: int = 4) -> str:
@@ -438,6 +488,19 @@ ol li, ul li {{ margin-bottom: 0.5rem; }}
 </div>
 
 <script>
+function esc(s) {{
+  return String(s ?? '').replace(/[&<>"']/g, ch => ({{
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }})[ch]);
+}}
+
+function setMsg(el, color, text) {{
+  const p = document.createElement('p');
+  if (color) {{ p.style.color = color; }} else {{ p.className = 'muted'; }}
+  p.textContent = text;
+  el.replaceChildren(p);
+}}
+
 function showTab(name, btn) {{
   document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
@@ -448,25 +511,29 @@ function showTab(name, btn) {{
 
 async function loadChats() {{
   const el = document.getElementById('chatsResult');
-  el.innerHTML = '<p class="muted">Загрузка...</p>';
+  setMsg(el, null, 'Загрузка...');
   try {{
     const r = await fetch('/api/chats');
     const data = await r.json();
     if (!r.ok) {{
-      el.innerHTML = '<p style="color:var(--err)">Ошибка: ' + (data.error || r.status) + '</p>';
+      setMsg(el, 'var(--err)', 'Ошибка: ' + (data.error || r.status));
       return;
     }}
     if (!data.chats || data.chats.length === 0) {{
-      el.innerHTML = '<p class="muted">Чатов не найдено</p>';
+      setMsg(el, null, 'Чатов не найдено');
       return;
     }}
-    let rows = data.chats.map(c =>
-      `<tr><td>${{c.id}}</td><td>${{c.type}}</td><td>${{c.title || '(без названия)'}}</td>` +
-      `<td><button type="button" class="secondary" onclick="addRoute(null, ${{c.id}}, ${{JSON.stringify(c.title || '')}})">Выбрать</button></td></tr>`
+    // Названия чатов задают посторонние люди в MAX — всё экранируем.
+    const rows = data.chats.map(c =>
+      `<tr><td>${{esc(c.id)}}</td><td>${{esc(c.type)}}</td><td>${{esc(c.title || '(без названия)')}}</td>` +
+      `<td><button type="button" class="secondary choose-chat" data-id="${{esc(c.id)}}" data-title="${{esc(c.title || '')}}">Выбрать</button></td></tr>`
     ).join('');
     el.innerHTML = '<table><tr><th>id</th><th>тип</th><th>название</th><th></th></tr>' + rows + '</table>';
+    el.querySelectorAll('.choose-chat').forEach(b =>
+      b.addEventListener('click', () => addRoute(null, b.dataset.id, b.dataset.title))
+    );
   }} catch (e) {{
-    el.innerHTML = '<p style="color:var(--err)">Ошибка запроса: ' + e + '</p>';
+    setMsg(el, 'var(--err)', 'Ошибка запроса: ' + e);
   }}
 }}
 
@@ -474,9 +541,9 @@ function addRoute(tgId, maxId, label) {{
   const table = document.getElementById('routesTable');
   const tr = document.createElement('tr');
   tr.innerHTML =
-    `<td><input name="route_tg" value="${{tgId ?? ''}}"></td>` +
-    `<td><input name="route_max" value="${{maxId ?? ''}}"></td>` +
-    `<td><input name="route_label" value="${{label ?? ''}}" placeholder="метка (необязательно)"></td>` +
+    `<td><input name="route_tg" value="${{esc(tgId)}}"></td>` +
+    `<td><input name="route_max" value="${{esc(maxId)}}"></td>` +
+    `<td><input name="route_label" value="${{esc(label)}}" placeholder="метка (необязательно)"></td>` +
     `<td><button type="button" class="secondary" onclick="this.closest('tr').remove()">✕</button></td>`;
   table.appendChild(tr);
 }}
@@ -485,7 +552,7 @@ async function sendTest() {{
   const el = document.getElementById('sendResult');
   const text = document.getElementById('testText').value;
   const maxChatId = document.getElementById('testTarget').value;
-  el.innerHTML = '<p class="muted">Отправка...</p>';
+  setMsg(el, null, 'Отправка...');
   try {{
     const r = await fetch('/api/test-send', {{
       method: 'POST',
@@ -494,12 +561,12 @@ async function sendTest() {{
     }});
     const data = await r.json();
     if (!r.ok) {{
-      el.innerHTML = '<p style="color:var(--err)">Ошибка: ' + (data.error || r.status) + '</p>';
+      setMsg(el, 'var(--err)', 'Ошибка: ' + (data.error || r.status));
       return;
     }}
-    el.innerHTML = '<p style="color:var(--ok)">Отправлено успешно</p>';
+    setMsg(el, 'var(--ok)', 'Отправлено успешно');
   }} catch (e) {{
-    el.innerHTML = '<p style="color:var(--err)">Ошибка запроса: ' + e + '</p>';
+    setMsg(el, 'var(--err)', 'Ошибка запроса: ' + e);
   }}
 }}
 
@@ -521,18 +588,18 @@ async function loadServiceStatus() {{
 
 async function restartService(key) {{
   const el = document.getElementById('restartResult');
-  el.innerHTML = '<p class="muted">Перезапуск...</p>';
+  setMsg(el, null, 'Перезапуск...');
   try {{
     const r = await fetch('/api/restart/' + key, {{ method: 'POST' }});
     const data = await r.json();
     if (!r.ok) {{
-      el.innerHTML = '<p style="color:var(--err)">Ошибка: ' + (data.error || r.status) + '</p>';
+      setMsg(el, 'var(--err)', 'Ошибка: ' + (data.error || r.status));
       return;
     }}
-    el.innerHTML = '<p style="color:var(--ok)">' + (data.note || 'Перезапущено') + '</p>';
+    setMsg(el, 'var(--ok)', data.note || 'Перезапущено');
     setTimeout(loadServiceStatus, 3000);
   }} catch (e) {{
-    el.innerHTML = '<p style="color:var(--err)">Ошибка запроса: ' + e + '</p>';
+    setMsg(el, 'var(--err)', 'Ошибка запроса: ' + e);
   }}
 }}
 
@@ -560,31 +627,35 @@ async def save(request: Request, _: None = Depends(check_auth)) -> RedirectRespo
     if token and "*" not in token:
         values["TELEGRAM_BOT_TOKEN"] = token
 
+    # Числовые поля валидируем до записи в .env: мусор там ломает Settings.from_env().
+    def _field(name: str) -> str:
+        return str(form.get(name, "")).strip()
+
     if "ALERT_CHAT_ID" in form:
-        values["ALERT_CHAT_ID"] = str(form.get("ALERT_CHAT_ID", "")).strip()
+        alert_chat = _field("ALERT_CHAT_ID")
+        if not alert_chat:
+            values["ALERT_CHAT_ID"] = ""
+        elif _is_int(alert_chat):
+            values["ALERT_CHAT_ID"] = str(int(alert_chat))
 
-    alert_seconds = str(form.get("ALERT_DISCONNECT_SECONDS", "")).strip()
-    if alert_seconds:
-        values["ALERT_DISCONNECT_SECONDS"] = alert_seconds
+    for name in (
+        "ALERT_DISCONNECT_SECONDS",
+        "RATE_LIMIT_MAX",
+        "RATE_LIMIT_WINDOW_SECONDS",
+    ):
+        raw = _field(name)
+        if raw and _is_int(raw) and int(raw) > 0:
+            values[name] = str(int(raw))
 
-    rate_max = str(form.get("RATE_LIMIT_MAX", "")).strip()
-    if rate_max:
-        values["RATE_LIMIT_MAX"] = rate_max
-
-    rate_window = str(form.get("RATE_LIMIT_WINDOW_SECONDS", "")).strip()
-    if rate_window:
-        values["RATE_LIMIT_WINDOW_SECONDS"] = rate_window
+    for name in ("DISK_ALERT_PERCENT", "MEM_ALERT_PERCENT"):
+        raw = _field(name)
+        if raw and _is_percent(raw):
+            values[name] = str(float(raw))
 
     if "REVERSE_FORWARD_ENABLED" in form:
-        values["REVERSE_FORWARD_ENABLED"] = str(form.get("REVERSE_FORWARD_ENABLED", "true")).strip()
-
-    disk_pct = str(form.get("DISK_ALERT_PERCENT", "")).strip()
-    if disk_pct:
-        values["DISK_ALERT_PERCENT"] = disk_pct
-
-    mem_pct = str(form.get("MEM_ALERT_PERCENT", "")).strip()
-    if mem_pct:
-        values["MEM_ALERT_PERCENT"] = mem_pct
+        flag = _field("REVERSE_FORWARD_ENABLED").lower()
+        if flag in ("true", "false"):
+            values["REVERSE_FORWARD_ENABLED"] = flag
 
     if "route_tg" in form:
         tg_ids = form.getlist("route_tg")
@@ -594,7 +665,7 @@ async def save(request: Request, _: None = Depends(check_auth)) -> RedirectRespo
         for i in range(len(tg_ids)):
             tg_raw = str(tg_ids[i]).strip()
             max_raw = str(max_ids[i]).strip() if i < len(max_ids) else ""
-            label = str(labels[i]).strip() if i < len(labels) else ""
+            label = clean_label(str(labels[i])) if i < len(labels) else ""
             if not tg_raw or not max_raw:
                 continue
             try:

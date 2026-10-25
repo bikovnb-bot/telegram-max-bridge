@@ -185,3 +185,17 @@ async def test_chats_requires_auth(status_writer):
         assert r.status == 401
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_forward_token_comparison_handles_non_ascii(status_writer):
+    settings = make_settings()
+    client, _ = await make_client(settings, status_writer)
+    try:
+        r = await client.post(
+            "/forward", json={"text": "hi"},
+            headers={"Authorization": "Bearer токен".encode("utf-8").decode("latin-1")},
+        )
+        assert r.status == 401
+    finally:
+        await client.close()
